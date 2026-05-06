@@ -5,7 +5,7 @@ jobs:
   build:
     runs-on: windows-latest # 在 GitHub 的 Windows 服务器上运行
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
@@ -15,9 +15,9 @@ jobs:
           pip install pyinstaller
           if (Test-Path requirements.txt) { pip install -r requirements.txt }
       - name: Build EXE
-        run: pyinstaller --onefile --windowed main.py
+        run: pyinstaller --onefile --windowed WdclGUI.py
       - name: Upload Artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: windows-exe
           path: dist/*.exe

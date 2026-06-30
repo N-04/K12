@@ -1,0 +1,1108 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>K12 文档智能处理工具</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <header class="desktop-header">
+        <div class="window-titlebar">
+          <div class="brand">
+            <span class="brand-mark" aria-hidden="true"></span>
+            <div>
+              <strong>K12 文档智能处理工具</strong>
+              <small id="serviceStatus">连接中</small>
+            </div>
+          </div>
+          <div class="window-status">
+            <span class="dot" id="localDot"></span>
+            <strong>本地模式</strong>
+            <small id="localStatus">读取中</small>
+            <span class="window-control">−</span>
+            <span class="window-control">□</span>
+            <span class="window-control">×</span>
+          </div>
+        </div>
+        <nav class="nav" aria-label="主导航">
+          <button class="nav-item active" data-view="workspace" title="工作台"><b>工作台</b></button>
+          <button class="nav-item" data-view="menu" title="菜单"><b>菜单</b></button>
+          <button class="nav-item" data-view="word" title="转换"><b>转换</b></button>
+          <button class="nav-item" data-view="formula" title="公式"><b>公式</b></button>
+          <button class="nav-item" data-view="macro" title="宏"><b>宏</b></button>
+          <button class="nav-item" data-view="images" title="图片"><b>图片</b></button>
+          <button class="nav-item" data-view="tasks" title="报告"><b>报告</b></button>
+          <button class="nav-item" data-view="settings" title="设置"><b>设置</b></button>
+        </nav>
+      </header>
+
+      <main class="content">
+        <header class="topbar">
+          <div class="top-actions command-strip">
+            <input id="fileInput" type="file" multiple hidden />
+            <input id="folderInput" type="file" webkitdirectory multiple hidden />
+            <button id="selectFilesButton" class="secondary-button add-button" type="button">＋ 添加文件</button>
+            <button id="selectFolderButton" class="secondary-button add-button" type="button">＋ 添加文件夹</button>
+            <label class="inline-field"><span>任务类型</span><select id="taskTypeSelect" class="select" aria-label="任务类型">
+              <option value="">请选择</option>
+              <option value="word_to_ppt">Word 转 PPT</option>
+              <option value="ppt_to_word">PPT 转 Word</option>
+              <option value="pdf_to_word">PDF 转 Word</option>
+              <option value="excel_to_pdf">Excel 转 PDF</option>
+              <option value="excel_to_word">Excel 转 Word</option>
+              <option value="excel_to_ppt">Excel 转 PPT</option>
+              <option value="formula_precheck">Word 公式预检</option>
+              <option value="omml_to_mathtype">OMML 转 MathType</option>
+              <option value="mathtype_format">MathType 格式化</option>
+              <option value="macro_sequence">Word 宏顺序执行</option>
+              <option value="small_image_scan">微小图片检索</option>
+            </select></label>
+            <label class="inline-field"><span>执行模式</span><select id="executeModeSelect" class="select compact-select" aria-label="执行模式">
+              <option value="auto">本地模式</option>
+              <option value="local">本地</option>
+              <option value="web">网页</option>
+              <option value="hybrid">混合</option>
+            </select></label>
+            <button id="createTaskButton" class="primary-button start-button" type="button">▶ 开始处理</button>
+            <button id="pauseActiveTaskButton" class="secondary-button" type="button">Ⅱ 暂停</button>
+            <button id="stopActiveTaskButton" class="secondary-button" type="button">■ 停止</button>
+            <button id="exportLatestReportButton" class="secondary-button" type="button">⇩ 导出报告</button>
+            <button id="createBatchButton" class="visually-hidden" type="button">创建批量任务</button>
+          </div>
+          <div class="title-block visually-hidden">
+            <h1 id="viewTitle">工作台</h1>
+            <p id="viewSubtitle">文件、任务、公式、宏和图片检索的统一入口</p>
+          </div>
+        </header>
+
+        <section class="mode-strip" aria-label="运行模式">
+          <article class="mode-card" data-mode-card="local">
+            <span class="mode-dot local"></span>
+            <div>
+              <strong>本地模式</strong>
+              <small id="localModeDetail">Office、MathType、宏与 OMML 依赖能力</small>
+            </div>
+            <b id="localModeBadge">待检测</b>
+          </article>
+          <article class="mode-card" data-mode-card="web">
+            <span class="mode-dot web"></span>
+            <div>
+              <strong>网页模式</strong>
+              <small id="webModeDetail">上传、转换、任务队列、模板与报告管理</small>
+            </div>
+            <b id="webModeBadge">可管理</b>
+          </article>
+          <article class="mode-card" data-mode-card="hybrid">
+            <span class="mode-dot hybrid"></span>
+            <div>
+              <strong>混合模式</strong>
+              <small id="hybridModeDetail">网页编排，本地客户端执行复杂文档任务</small>
+            </div>
+            <b id="hybridModeBadge">自动分流</b>
+          </article>
+        </section>
+
+        <section class="view" data-panel="menu">
+          <section class="panel wide-panel menu-structure-panel">
+            <div class="panel-header">
+              <div>
+                <h2>PRD 菜单结构</h2>
+                <span>按首页、文件处理、Word、宏、公式、图片、批量、本地客户端、网页管理和系统设置组织</span>
+              </div>
+              <button class="secondary-button" data-view-shortcut="workspace" type="button">返回工作台</button>
+            </div>
+            <div id="prdMenuStructure" class="menu-structure-grid"></div>
+          </section>
+        </section>
+
+        <section class="view view-active" data-panel="workspace">
+          <div id="dropZone" class="desktop-workspace" tabindex="0">
+            <section class="queue-panel">
+              <div class="panel-header queue-header">
+                <h2>文件队列</h2>
+                <span id="fileCounter">0 个文件</span>
+              </div>
+              <div class="segmented queue-tabs" role="group" aria-label="文件筛选">
+                <button class="segment active" data-filter="all">全部</button>
+                <button class="segment" data-filter="Word">Word</button>
+                <button class="segment" data-filter="PDF">PDF</button>
+                <button class="segment" data-filter="PPT">PPT</button>
+                <button class="segment" data-filter="Excel">Excel</button>
+                <button class="segment" data-filter="异常">异常</button>
+              </div>
+              <div id="formatSupportStrip" class="format-support-strip" aria-label="支持格式说明">
+                <span>支持格式</span>
+                <b>Word DOCX/DOC/DOCM</b>
+                <b>PDF</b>
+                <b>PPTX/PPT/PPTM</b>
+                <b>Excel XLSX/XLS/XLSM</b>
+                <b>ZIP</b>
+              </div>
+              <div class="table-scroll queue-table">
+                <table>
+                  <thead>
+                    <tr>
+                      <th><input id="selectAllFiles" type="checkbox" /></th>
+                      <th>文件名</th>
+                      <th>类型</th>
+                      <th>大小</th>
+                      <th>页/页签</th>
+                      <th>能力</th>
+                      <th>公式</th>
+                      <th>OMML</th>
+                      <th>宏</th>
+                      <th>状态</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="fileTableBody"></tbody>
+                </table>
+              </div>
+              <section id="selectionBar" class="selection-bar queue-footer">
+                <div class="queue-selection-copy">
+                  <strong id="selectionTitle">未选择文件</strong>
+                  <span id="selectionHint">选择文件后可创建任务</span>
+                </div>
+                <div class="row-actions">
+                  <button id="downloadSelectedButton" class="mini-button queue-extra-action">下载所选</button>
+                  <button id="downloadFilteredButton" class="mini-button queue-extra-action">下载当前筛选</button>
+                  <button id="clearSelectionButton" class="mini-button">清空列表</button>
+                  <button id="refreshButton" class="mini-button" title="刷新数据" type="button">↻ 刷新</button>
+                </div>
+              </section>
+            </section>
+
+            <section class="process-panel">
+              <div class="panel-header">
+                <h2>处理配置</h2>
+                <span id="plannerScope">未选择文件</span>
+              </div>
+              <div class="process-block">
+                <h3>处理流程</h3>
+                <div id="taskPlanner" class="planner-list process-flow"></div>
+              </div>
+              <div class="process-block">
+                <h3>参数</h3>
+                <div class="settings-grid compact-form">
+                  <label><span>输出格式</span><select><option>DOCX</option><option>PPTX</option><option>PDF</option><option>XLSX</option></select></label>
+                  <label><span>失败策略</span><select id="workspaceFailureStrategy"><option>跳过</option><option>停止</option><option>询问</option></select></label>
+                  <label><span>并发数量</span><input id="workspaceConcurrency" type="number" min="1" value="3" /></label>
+                  <label><span>模板</span><select><option>默认教学模板</option><option>通用讲义模板</option></select></label>
+                </div>
+              </div>
+              <div class="process-block">
+                <h3>快速任务</h3>
+                <div class="quick-task-row home-quick-grid">
+                  <button class="secondary-button quick-task" data-task="word_to_ppt">Word 转 PPT</button>
+                  <button class="secondary-button quick-task" data-task="ppt_to_word">PPT 转 Word</button>
+                  <button class="secondary-button quick-task" data-task="pdf_to_word">PDF 转 Word</button>
+                  <button class="secondary-button quick-task" data-task="formula_precheck">MathType 公式处理</button>
+                  <button class="secondary-button quick-task" data-task="omml_to_mathtype">Word 自带公式转 MathType</button>
+                  <button class="secondary-button quick-task" data-task="mathtype_format">Word 公式格式化</button>
+                  <button class="secondary-button quick-task" data-task="macro_sequence">Word 宏顺序执行</button>
+                  <button class="secondary-button quick-task" data-task="pdf_to_word">PDF 公式识别</button>
+                  <button class="secondary-button quick-task" data-task="small_image_scan">微小图片检索</button>
+                  <button class="secondary-button quick-task" data-task="batch_process">批量处理</button>
+                </div>
+              </div>
+              <div id="routeAdvisor" class="route-advisor"></div>
+              <div class="drop-hint">可将文件拖到窗口任意空白区域导入</div>
+            </section>
+
+            <aside class="progress-panel">
+              <section class="panel progress-card">
+                <div class="panel-header">
+                  <h2>进度与日志</h2>
+                  <button class="mini-button" id="clearLogVisualButton" type="button">清空日志</button>
+                </div>
+                <div id="workspaceProgress" class="progress-summary"></div>
+                <div id="workspaceRecentTasks" class="recent-task-list"></div>
+                <div id="completionNoticePanel" class="notice-list task-notice-list"></div>
+                <div id="workspaceLogList" class="log-list realtime-log"></div>
+              </section>
+              <section class="panel report-card">
+                <div class="panel-header">
+                  <h2>最近报告 <span id="latestReportDate"></span></h2>
+                  <button class="mini-button" data-view-shortcut="tasks" type="button">查看全部</button>
+                </div>
+                <div id="workspaceMetrics" class="metric-grid report-metrics"></div>
+                <div id="latestReportPanel" class="report-summary"></div>
+              </section>
+              <section class="panel preview-helper">
+                <div class="panel-header">
+                  <h2>结果预览</h2>
+                  <span>文件详情、结构预览和能力状态</span>
+                </div>
+                <div id="fileDetail" class="detail-list"></div>
+                <div id="filePreviewPanel" class="preview-panel"></div>
+                <div id="capabilityList" class="capability-list"></div>
+              </section>
+            </aside>
+          </div>
+        </section>
+
+        <section class="view" data-panel="word">
+          <div class="workbench-layout">
+            <section class="panel wide-panel">
+              <div class="panel-header">
+                <h2>转换任务</h2>
+                <span>Word、PPT、PDF、Excel 多格式处理</span>
+              </div>
+              <div class="conversion-grid">
+                <button class="conversion-card quick-task" data-task="word_to_ppt" type="button">
+                  <strong>Word 转 PPT</strong>
+                  <small>教案、讲义和报告材料生成课件</small>
+                </button>
+                <button class="conversion-card quick-task" data-task="ppt_to_word" type="button">
+                  <strong>PPT 转 Word</strong>
+                  <small>逐页讲义、内容提取、备注优先和大纲模式</small>
+                </button>
+                <button class="conversion-card quick-task" data-task="pdf_to_word" type="button">
+                  <strong>PDF 转 Word</strong>
+                  <small>使用 Mathpix 识别扫描件、公式和表格线索</small>
+                </button>
+                <button class="conversion-card quick-task" data-task="excel_to_pdf" type="button">
+                  <strong>Excel 转 PDF</strong>
+                  <small>支持工作表范围、公式模式和拆分输出</small>
+                </button>
+                <button class="conversion-card quick-task" data-task="excel_to_word" type="button">
+                  <strong>Excel 转 Word</strong>
+                  <small>提取表格、公式、图表、图片和批注摘要</small>
+                </button>
+                <button class="conversion-card quick-task" data-task="excel_to_ppt" type="button">
+                  <strong>Excel 转 PPT</strong>
+                  <small>按工作表生成数据页和图表页</small>
+                </button>
+              </div>
+            </section>
+
+            <section class="panel wide-panel word-workspace">
+              <div class="panel-header">
+                <div>
+                  <h2>Word 处理工作区</h2>
+                  <span>Word 预览、公式/OMML/MathType 检测、宏检测和报告入口</span>
+                </div>
+                <div class="row-actions">
+                  <button id="selectWordFilesButton" class="secondary-button" type="button">选择 Word</button>
+                  <button id="wordPreviewSelectedButton" class="secondary-button" type="button">预览</button>
+                  <button id="wordPrecheckButton" class="secondary-button quick-task" data-task="formula_precheck" type="button">公式预检</button>
+                  <button id="wordExportPptButton" class="primary-button" type="button">转 PPT</button>
+                </div>
+              </div>
+              <div id="wordStats" class="metric-grid compact-metrics"></div>
+              <div class="word-workspace-grid">
+                <section>
+                  <h3>Word 文件预览</h3>
+                  <div id="wordFilePreviewList" class="object-grid"></div>
+                </section>
+                <section>
+                  <h3>公式与 OMML 检测</h3>
+                  <div id="wordFormulaDetectionList" class="object-grid"></div>
+                </section>
+                <section>
+                  <h3>宏检测结果</h3>
+                  <div id="wordMacroDetectionList" class="object-grid"></div>
+                </section>
+                <section>
+                  <h3>处理报告入口</h3>
+                  <div id="wordReportLinkList" class="object-grid"></div>
+                </section>
+              </div>
+            </section>
+
+            <section class="panel wide-panel ppt-workspace">
+              <div class="panel-header">
+                <div>
+                  <h2>PPT 转 Word 工作区</h2>
+                  <span>缩略图列表、内容预览、备注/图片/公式提取和 Word 输出</span>
+                </div>
+                <div class="row-actions">
+                  <button id="selectPptFilesButton" class="secondary-button" type="button">选择 PPT</button>
+                  <button id="pptPreviewSelectedButton" class="secondary-button" type="button">预览</button>
+                  <button id="pptExportWordButton" class="primary-button" type="button">转 Word</button>
+                </div>
+              </div>
+              <div id="pptStats" class="metric-grid compact-metrics"></div>
+              <div class="ppt-workspace-grid">
+                <section>
+                  <h3>PPT 缩略图列表</h3>
+                  <div id="pptFileList" class="object-grid"></div>
+                </section>
+                <section>
+                  <h3>PPT 内容预览</h3>
+                  <div id="pptContentPreview" class="object-grid"></div>
+                </section>
+                <section>
+                  <h3>转换设置</h3>
+                  <div class="settings-grid compact-form">
+                    <label><span>转换模式</span><select id="pptWorkspaceMode"><option>逐页讲义模式</option><option>内容提取模式</option><option>图文混排模式</option><option>备注优先模式</option><option>大纲模式</option></select></label>
+                    <label><span>生成目录</span><input id="pptWorkspaceGenerateToc" type="checkbox" checked /></label>
+                    <label><span>提取备注</span><input id="pptWorkspaceExtractNotes" type="checkbox" checked /></label>
+                    <label><span>提取图片</span><input id="pptWorkspaceExtractImages" type="checkbox" checked /></label>
+                    <label><span>提取公式</span><input id="pptWorkspaceExtractFormulas" type="checkbox" checked /></label>
+                  </div>
+                </section>
+                <section>
+                  <h3>结果预览</h3>
+                  <div id="pptArtifactList" class="object-grid"></div>
+                </section>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <h2>Word 转 PPT 参数</h2>
+              </div>
+              <div class="settings-grid">
+                <label><span>每页最大字数</span><input id="wordMaxCharsPerSlide" type="number" min="80" max="1200" value="320" /></label>
+                <label><span>自动分页</span><input id="wordAutoPagination" type="checkbox" checked /></label>
+                <label><span>生成目录页</span><input id="wordGenerateToc" type="checkbox" checked /></label>
+                <label><span>保留图片</span><input id="wordRetainImages" type="checkbox" checked /></label>
+                <label><span>保留表格</span><input id="wordRetainTables" type="checkbox" checked /></label>
+                <label><span>保留公式</span><input id="wordRetainFormulas" type="checkbox" checked /></label>
+                <label><span>先转 MathType</span><input id="wordConvertOmmlFirst" type="checkbox" checked /></label>
+                <label><span>套用 PPT 模板</span><input id="wordApplyTemplate" type="checkbox" checked /></label>
+                <label><span>生成演讲者备注</span><input id="wordGenerateNotes" type="checkbox" /></label>
+                <label><span>自动美化版式</span><input id="wordAutoBeautify" type="checkbox" checked /></label>
+              </div>
+              <div class="action-row">
+                <button class="secondary-button quick-task" data-task="formula_precheck">公式预检</button>
+                <button class="secondary-button quick-task" data-task="omml_to_mathtype">OMML 转换</button>
+                <button class="secondary-button quick-task" data-task="macro_sequence">宏顺序执行</button>
+                <button class="primary-button quick-task" data-task="word_to_ppt">Word 转 PPT</button>
+              </div>
+            </section>
+
+            <section class="panel wide-panel pdf-workspace">
+              <div class="panel-header">
+                <div>
+                  <h2>PDF 转 Word / Mathpix</h2>
+                  <span>PDF 类型识别、OCR 设置、低置信度内容和 Word 导出</span>
+                </div>
+                <div class="row-actions">
+                  <button id="selectPdfFilesButton" class="secondary-button" type="button">选择 PDF</button>
+                  <button id="pdfSettingsShortcutButton" class="secondary-button" type="button">OCR 设置</button>
+                  <button id="pdfExportWordButton" class="primary-button" type="button">导出 Word</button>
+                </div>
+              </div>
+              <div id="pdfStats" class="metric-grid compact-metrics"></div>
+              <div class="pdf-workspace-grid">
+                <section>
+                  <h3>PDF 页面预览</h3>
+                  <div id="pdfFileList" class="object-grid"></div>
+                </section>
+                <section>
+                  <h3>OCR 与保留计划</h3>
+                  <div id="pdfOcrSettings" class="object-grid"></div>
+                </section>
+                <section>
+                  <h3>Mathpix 作业队列</h3>
+                  <div id="pdfMathpixJobList" class="object-grid"></div>
+                </section>
+                <section>
+                  <h3>低置信度内容</h3>
+                  <div id="pdfLowConfidenceList" class="object-grid"></div>
+                </section>
+                <section>
+                  <h3>结果预览</h3>
+                  <div id="pdfArtifactList" class="object-grid"></div>
+                </section>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <h2>预检结果</h2>
+              </div>
+              <div id="wordInsight" class="insight-grid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <h2>OMML 依赖</h2>
+                <button id="exportOmmlFailuresButton" class="mini-button" type="button">导出失败清单</button>
+              </div>
+              <div id="ommlDependencyList" class="object-grid"></div>
+            </section>
+
+            <section class="panel wide-panel">
+              <div class="panel-header">
+                <h2>Word 流程</h2>
+              </div>
+              <div id="wordFlow" class="flow-steps"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-panel="formula">
+          <section class="panel">
+            <div class="panel-header">
+              <h2>公式对象</h2>
+              <div class="filter-row">
+                <select id="formulaSourceFilter" class="select">
+                  <option value="all">全部来源</option>
+                  <option value="OMML">OMML</option>
+                  <option value="MathType">MathType</option>
+                  <option value="LaTeX">LaTeX</option>
+                  <option value="low">待确认</option>
+                </select>
+                <button id="formulaBulkConfirm" class="secondary-button" type="button">批量确认</button>
+                <button id="exportFormulasButton" class="secondary-button" type="button">导出公式包</button>
+                <button id="exportFormulaSheetButton" class="secondary-button" type="button">导出公式表</button>
+                <button class="secondary-button quick-task" data-task="formula_precheck">重新识别</button>
+                <button class="primary-button quick-task" data-task="mathtype_format">格式化</button>
+              </div>
+            </div>
+            <div id="formulaStats" class="metric-grid compact-metrics"></div>
+            <div class="formula-workbench">
+              <div id="formulaList" class="object-grid"></div>
+              <aside id="formulaDetailPanel" class="formula-detail-panel"></aside>
+            </div>
+          </section>
+        </section>
+
+        <section class="view" data-panel="macro">
+          <div class="two-column">
+            <section class="panel">
+              <div class="panel-header">
+                <h2>宏库</h2>
+                <input id="macroSearch" class="input" placeholder="搜索宏" />
+              </div>
+              <div class="filter-row">
+                <select id="macroSourceFilter" class="select">
+                  <option value="all">全部来源</option>
+                  <option value="系统内置">系统内置</option>
+                  <option value="本地宏库">本地宏库</option>
+                  <option value="模板">模板</option>
+                </select>
+                <select id="macroPurposeFilter" class="select">
+                  <option value="all">全部用途</option>
+                  <option value="样式统一">样式统一</option>
+                  <option value="清理排版">清理排版</option>
+                  <option value="导出准备">导出准备</option>
+                  <option value="公式修复">公式修复</option>
+                  <option value="OCR 清理">OCR 清理</option>
+                </select>
+                <select id="macroRecentFilter" class="select">
+                  <option value="all">全部使用状态</option>
+                  <option value="recent">最近使用</option>
+                  <option value="unused">未使用</option>
+                </select>
+              </div>
+              <div id="macroLibrary" class="macro-list"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-header">
+                <h2>宏详情</h2>
+                <span id="macroDetailScope">未选择</span>
+              </div>
+              <div id="macroDetailPanel" class="macro-detail-panel"></div>
+            </section>
+            <section class="panel">
+              <div class="panel-header">
+                <h2>执行顺序</h2>
+                <div class="row-actions">
+                  <button id="saveMacroTemplateButton" class="secondary-button">保存模板</button>
+                  <button id="loadMacroReportSequenceButton" class="mini-button" type="button">载入报告顺序</button>
+                  <button id="exportMacroFailuresButton" class="mini-button" type="button">导出失败清单</button>
+                  <button class="primary-button quick-task" data-task="macro_sequence">执行</button>
+                </div>
+              </div>
+              <div class="settings-grid compact-form">
+                <label><span>模板名称</span><input id="macroTemplateName" type="text" placeholder="如：教案转换前清理" /></label>
+                <label><span>顺序模板</span><select id="macroTemplateSelect"><option value="">选择宏顺序模板</option></select></label>
+                <label><span>失败策略</span><select id="macroFailureStrategy"><option>跳过</option><option>停止</option><option>继续</option><option>询问</option></select></label>
+                <label><span>执行时机</span><select id="macroTimingSelect"><option>Word 处理前</option><option>Word 处理后</option><option>转换前</option><option>转换后</option></select></label>
+                <label><span>执行前备份</span><input id="macroBackup" type="checkbox" /></label>
+                <label><span>确认宏风险</span><input id="confirmMacroRisk" type="checkbox" /></label>
+              </div>
+              <div class="action-row template-actions">
+                <span id="macroTemplateCount" class="muted-inline">0 个模板</span>
+                <button id="loadMacroTemplateButton" class="mini-button">加载模板</button>
+                <button id="deleteMacroTemplateButton" class="mini-button danger">删除模板</button>
+              </div>
+              <ol id="macroOrder" class="order-list"></ol>
+              <div id="macroResults" class="object-grid"></div>
+            </section>
+            <section class="panel wide-panel">
+              <div class="panel-header">
+                <h2>宏执行日志</h2>
+                <span id="macroLogScope">最近宏任务</span>
+              </div>
+              <div id="macroLogList" class="log-list macro-log-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-panel="images">
+          <section class="panel">
+            <div class="panel-header">
+              <h2>微小图片</h2>
+              <div class="filter-row">
+                <select id="imageKindFilter" class="select">
+                  <option value="all">全部</option>
+                  <option value="formula">疑似公式</option>
+                  <option value="qrcode">疑似二维码</option>
+                  <option value="stamp">疑似印章</option>
+                  <option value="signature">疑似签名</option>
+                </select>
+                <select id="imageSourceFilter" class="select">
+                  <option value="all">全部文件</option>
+                </select>
+                <select id="imageDuplicateFilter" class="select">
+                  <option value="all">重复不限</option>
+                  <option value="unique">仅非重复</option>
+                  <option value="duplicate">仅重复</option>
+                </select>
+                <input id="imageLocationFilter" class="input compact-input" placeholder="位置关键词" />
+                <input id="imageMaxAreaFilter" class="input compact-input" type="number" min="1" placeholder="最大面积" />
+                <button id="exportImagesButton" class="secondary-button">导出图片包</button>
+                <button id="exportImageManifestButton" class="secondary-button">导出清单</button>
+                <button class="secondary-button quick-task" data-task="small_image_scan">检索</button>
+              </div>
+            </div>
+            <div id="imageStats" class="metric-grid compact-metrics"></div>
+            <div class="image-workbench">
+              <div id="smallImageGrid" class="image-grid"></div>
+              <aside id="imageDetailPanel" class="image-detail-panel"></aside>
+            </div>
+          </section>
+        </section>
+
+        <section class="view" data-panel="tasks">
+          <div class="tasks-layout">
+            <section class="panel">
+              <div class="panel-header">
+                <h2>任务概览</h2>
+              </div>
+              <div id="taskMetrics" class="metric-grid"></div>
+            </section>
+
+            <section class="table-panel">
+              <div class="panel-header">
+                <h2>任务中心</h2>
+                <span id="taskCounter">0 个任务</span>
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>任务</th>
+                      <th>模式</th>
+                      <th>文件数</th>
+                      <th>状态</th>
+                      <th>成功</th>
+                      <th>失败</th>
+                      <th>进度</th>
+                      <th>耗时</th>
+                      <th>失败原因</th>
+                      <th>开始</th>
+                      <th>结束</th>
+                      <th>报告</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="taskTableBody"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <h2>任务详情</h2>
+                <span id="taskDetailScope">未选择任务</span>
+              </div>
+              <div id="taskDetailPanel" class="detail-list task-detail-panel"></div>
+            </section>
+
+            <section class="table-panel">
+              <div class="panel-header">
+                <h2>报告中心</h2>
+                <span id="reportCounter">0 份报告</span>
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>报告</th>
+                      <th>成功</th>
+                      <th>失败</th>
+                      <th>公式</th>
+                      <th>宏</th>
+                      <th>微小图</th>
+                      <th>OMML 依赖</th>
+                      <th>生成时间</th>
+                      <th>下载</th>
+                    </tr>
+                  </thead>
+                  <tbody id="reportTableBody"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <h2>转换前后对比</h2>
+              </div>
+              <div id="comparisonPanel" class="comparison-panel"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <h2>排版校正</h2>
+                <span id="layoutReviewScope">暂无报告</span>
+              </div>
+              <div class="settings-grid compact-form">
+                <label><span>问题类型</span><select id="layoutIssueType"><option>页码</option><option>标题层级</option><option>表格结构</option><option>图片位置</option><option>公式位置</option><option>公式编号</option></select></label>
+                <label><span>状态</span><select id="layoutStatus"><option>待校正</option><option>已校正</option><option>已忽略</option><option>需本地客户端处理</option></select></label>
+                <label><span>位置</span><input id="layoutLocation" type="text" placeholder="如：第 2 页 / 表格 1" /></label>
+                <label><span>页码</span><input id="layoutPageIndex" type="number" min="0" /></label>
+                <label><span>修复前</span><input id="layoutBefore" type="text" /></label>
+                <label><span>修复后</span><input id="layoutAfter" type="text" /></label>
+                <label><span>建议</span><input id="layoutRecommendation" type="text" /></label>
+                <label><span>备注</span><input id="layoutNote" type="text" /></label>
+              </div>
+              <div class="action-row">
+                <button id="saveLayoutAnnotationButton" class="secondary-button" type="button">保存校正</button>
+              </div>
+              <div id="layoutAnnotationList" class="object-grid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <h2>任务日志</h2>
+                <span id="logScope">全部任务</span>
+                <div class="row-actions">
+                  <button id="clearTaskLogFilterButton" class="mini-button" type="button">全部日志</button>
+                  <button id="exportLogsButton" class="secondary-button" type="button">导出日志</button>
+                </div>
+              </div>
+              <div id="logList" class="log-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-panel="admin">
+          <div class="settings-layout">
+            <section class="panel">
+              <div class="panel-header">
+                <h2>用户与角色</h2>
+                <span id="currentUserLabel">未选择</span>
+              </div>
+              <div class="settings-grid compact-form">
+                <label><span>用户名称</span><input id="userName" type="text" placeholder="如：高一数学组" /></label>
+                <label><span>角色</span><select id="userRole"><option>管理员</option><option>教师</option><option>学生</option><option>访客</option></select></label>
+                <label><span>状态</span><select id="userStatus"><option>启用</option><option>停用</option></select></label>
+                <label><span>设为当前用户</span><input id="userActive" type="checkbox" /></label>
+              </div>
+              <div class="action-row">
+                <button id="saveUserButton" class="primary-button" type="button">保存用户</button>
+              </div>
+              <div id="userList" class="object-grid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <h2>模板管理</h2>
+                <span id="templateCount">0 个模板</span>
+              </div>
+              <div class="settings-grid compact-form">
+                <label><span>模板名称</span><input id="templateName" type="text" placeholder="如：K12 讲义模板" /></label>
+                <label><span>模板类型</span><select id="templateType"><option>PPT 模板</option><option>Word 模板</option><option>Excel 模板</option><option>OCR 参数模板</option><option>公式格式模板</option></select></label>
+                <label><span>适用任务</span><select id="templateAppliesTo"><option value="word_to_ppt">Word 转 PPT</option><option value="ppt_to_word">PPT 转 Word</option><option value="pdf_to_word">PDF 转 Word</option><option value="excel_to_ppt">Excel 转 PPT</option><option value="mathtype_format">MathType 格式化</option></select></label>
+                <label><span>本地模板路径</span><input id="templatePath" type="text" placeholder="/path/template.pptx" /></label>
+                <label><span>说明</span><input id="templateDescription" type="text" placeholder="用途、年级、学科或版式说明" /></label>
+              </div>
+              <div class="action-row">
+                <button id="saveTemplateButton" class="primary-button" type="button">保存模板</button>
+              </div>
+              <div id="templateList" class="object-grid"></div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <h2>授权管理</h2>
+              </div>
+              <div id="authorizationList" class="object-grid"></div>
+            </section>
+
+            <section class="panel wide-panel">
+              <div class="panel-header">
+                <h2>报告管理</h2>
+                <button class="mini-button" data-view-shortcut="tasks" type="button">打开报告中心</button>
+              </div>
+              <div id="adminReportSummary" class="metric-grid compact-metrics"></div>
+              <div id="adminReportList" class="object-grid"></div>
+            </section>
+
+            <section class="panel wide-panel">
+              <div class="panel-header">
+                <h2>运行预检</h2>
+                <span id="preflightSummary">读取中</span>
+              </div>
+              <div id="preflightList" class="object-grid"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="view" data-panel="settings">
+          <div class="settings-layout">
+            <section class="panel wide-panel settings-overview">
+              <div class="panel-header">
+                <h2>系统设置</h2>
+                <span>13 个设置分组</span>
+              </div>
+              <nav class="settings-section-nav" aria-label="设置分组导航">
+                <a href="#settings-basic">基础设置</a>
+                <a href="#settings-conversion">转换设置</a>
+                <a href="#settings-ocr">OCR 设置</a>
+                <a href="#settings-formula">公式设置</a>
+                <a href="#settings-omml">OMML 设置</a>
+                <a href="#settings-mathtype">MathType 格式化</a>
+                <a href="#settings-macro">Word 宏设置</a>
+                <a href="#settings-image">图片检索设置</a>
+                <a href="#settings-output">输出目录设置</a>
+                <a href="#settings-log">日志设置</a>
+                <a href="#settings-cache">缓存清理设置</a>
+                <a href="#settings-local">本地客户端连接</a>
+                <a href="#settings-cloud">云端同步设置</a>
+              </nav>
+            </section>
+            <section class="panel" id="settings-basic">
+              <div class="panel-header">
+                <h2>基础设置</h2>
+              </div>
+              <div class="settings-grid">
+                <label><span>最大并发</span><input id="maxConcurrentTasks" type="number" min="1" max="8" /></label>
+                <label><span>单文件限制 MB</span><input id="singleFileLimitMb" type="number" min="1" /></label>
+                <label><span>最小磁盘空间 MB</span><input id="minFreeDiskMb" type="number" min="1" /></label>
+                <div id="settings-output" class="settings-subtitle">输出目录设置</div>
+                <label><span>输出目录</span><input id="outputDirectory" type="text" /></label>
+                <label><span>输出同名</span><select id="outputConflictStrategy"><option>自动重命名</option><option>跳过</option><option>覆盖</option></select></label>
+                <div class="settings-subtitle">基础偏好</div>
+                <label><span>重复文件</span><select id="duplicateFileStrategy"><option>自动重命名</option><option>跳过</option><option>覆盖</option></select></label>
+                <label><span>保留原文件</span><input id="keepOriginalFile" type="checkbox" /></label>
+                <label><span>自动打开输出目录</span><input id="autoOpenOutputDirectory" type="checkbox" /></label>
+                <label><span>生成报告</span><input id="generateReport" type="checkbox" /></label>
+                <label><span>任务完成提醒</span><input id="enableTaskCompletionNotice" type="checkbox" /></label>
+                <label><span>保存历史记录</span><input id="saveHistory" type="checkbox" /></label>
+                <label><span>详细日志</span><input id="verboseLogging" type="checkbox" /></label>
+                <div id="settings-cloud" class="settings-subtitle">云端同步设置</div>
+                <label><span>云端同步</span><input id="allowCloudSync" type="checkbox" /></label>
+              </div>
+            </section>
+            <section class="panel" id="settings-conversion">
+              <div class="panel-header">
+                <h2>转换设置</h2>
+              </div>
+              <div class="settings-grid">
+                <label><span>Word 转 PPT 模板</span><input id="wordToPptTemplate" type="text" /></label>
+                <label><span>PPT 转 Word 模式</span><select id="pptToWordMode"><option>逐页讲义模式</option><option>内容提取模式</option><option>图文混排模式</option><option>备注优先模式</option><option>大纲模式</option></select></label>
+                <label><span>PDF 精度模式</span><select id="pdfPrecisionMode"><option>平衡</option><option>高精度</option><option>快速</option></select></label>
+                <label><span>Excel 转换范围</span><select id="excelConversionRange"><option>全部工作表</option><option>当前工作表</option><option>选区</option></select></label>
+                <label><span>Excel 公式</span><select id="excelFormulaMode"><option>保留公式</option><option>仅保留计算结果</option></select></label>
+                <label><span>拆分工作表</span><input id="excelSplitSheets" type="checkbox" /></label>
+                <label><span>保留图片</span><input id="retainImages" type="checkbox" /></label>
+                <label><span>保留表格</span><input id="retainTables" type="checkbox" /></label>
+                <label><span>保留页眉页脚</span><input id="retainHeadersFooters" type="checkbox" /></label>
+                <label><span>保留脚注尾注</span><input id="retainFootnotesEndnotes" type="checkbox" /></label>
+                <label><span>保留批注</span><input id="retainComments" type="checkbox" /></label>
+                <label><span>保留修订标记</span><input id="retainRevisions" type="checkbox" /></label>
+              </div>
+            </section>
+            <section class="panel" id="settings-cache">
+              <div class="panel-header">
+                <h2>系统维护</h2>
+                <button id="cleanupMaintenanceButton" class="secondary-button" type="button">清理历史</button>
+              </div>
+              <div class="settings-grid">
+                <label><span>自动清理临时文件</span><input id="autoCleanTemp" type="checkbox" /></label>
+                <label><span>历史保留天数</span><input id="cleanupRetentionDays" type="number" min="1" /></label>
+                <label><span>清理周期天数</span><input id="cleanupIntervalDays" type="number" min="1" /></label>
+                <label><span>上次自动清理</span><input id="lastCleanupAt" type="text" readonly /></label>
+              </div>
+            </section>
+            <section class="panel" id="settings-log">
+              <div class="panel-header">
+                <h2>日志设置</h2>
+              </div>
+              <div class="settings-grid">
+                <label><span>日志保留天数</span><input id="logRetentionDays" type="number" min="1" /></label>
+                <label><span>记录上传日志</span><input id="logUploadEvents" type="checkbox" /></label>
+                <label><span>记录转换日志</span><input id="logConversionEvents" type="checkbox" /></label>
+                <label><span>记录公式日志</span><input id="logFormulaEvents" type="checkbox" /></label>
+                <label><span>记录 OMML 日志</span><input id="logOmmlEvents" type="checkbox" /></label>
+                <label><span>记录宏执行日志</span><input id="logMacroEvents" type="checkbox" /></label>
+                <label><span>记录图片日志</span><input id="logImageEvents" type="checkbox" /></label>
+                <label><span>记录错误日志</span><input id="logErrorEvents" type="checkbox" /></label>
+                <label><span>日志导出格式</span><select id="logExportFormat"><option value="txt">TXT</option><option value="log">LOG</option><option value="csv">CSV</option><option value="json">JSON</option></select></label>
+              </div>
+            </section>
+            <section class="panel" id="settings-ocr">
+              <div class="panel-header">
+                <h2>OCR 与图片</h2>
+              </div>
+              <div class="settings-grid">
+                <label><span>OCR 语言</span><input id="ocrLanguage" type="text" /></label>
+                <label><span>文字 OCR</span><input id="enableTextOcr" type="checkbox" /></label>
+                <label><span>公式 OCR</span><input id="enableFormulaOcr" type="checkbox" /></label>
+                <label><span>表格 OCR</span><input id="enableTableOcr" type="checkbox" /></label>
+                <label><span>OCR 精度模式</span><select id="ocrPrecisionMode"><option>平衡</option><option>高精度</option><option>快速</option></select></label>
+                <label><span>OCR 速度模式</span><select id="ocrSpeedMode"><option>标准</option><option>优先速度</option><option>后台慢速</option></select></label>
+                <div id="settings-image" class="settings-subtitle">图片检索设置</div>
+                <label><span>小图最大宽</span><input id="smallImageMaxWidth" type="number" /></label>
+                <label><span>小图最大高</span><input id="smallImageMaxHeight" type="number" /></label>
+                <label><span>小图最大面积</span><input id="smallImageMaxArea" type="number" /></label>
+                <label><span>包含页眉页脚图片</span><input id="includeHeaderFooterImages" type="checkbox" /></label>
+                <label><span>包含水印图片</span><input id="includeWatermarkImages" type="checkbox" /></label>
+                <label><span>包含透明图片</span><input id="includeTransparentImages" type="checkbox" /></label>
+                <label><span>包含重复图片</span><input id="includeDuplicateImages" type="checkbox" /></label>
+                <label><span>图片导出格式</span><select id="imageExportFormat"><option>原格式</option><option>PNG</option><option>JPG</option></select></label>
+              </div>
+            </section>
+            <section class="panel">
+              <div class="panel-header">
+                <h2>Mathpix PDF</h2>
+              </div>
+              <div class="settings-grid">
+                <label><span>PDF 转 Word 引擎</span><select id="pdfToWordEngine"><option>Mathpix</option></select></label>
+                <label><span>授权外部上传</span><input id="allowExternalMathpixUpload" type="checkbox" /></label>
+                <label><span>等待识别完成</span><input id="waitForMathpix" type="checkbox" /></label>
+                <label><span>APP ID 环境变量</span><input id="mathpixAppIdEnv" type="text" /></label>
+                <label><span>APP KEY 环境变量</span><input id="mathpixAppKeyEnv" type="text" /></label>
+                <label><span>轮询超时秒</span><input id="mathpixPollTimeoutSeconds" type="number" /></label>
+              </div>
+            </section>
+            <section class="panel" id="settings-omml">
+              <div class="panel-header">
+                <h2>OMML 设置</h2>
+              </div>
+              <div class="settings-grid">
+                <label><span>OMML 预检</span><input id="enableOmmlPrecheck" type="checkbox" /></label>
+                <label><span>自动检索 OMML</span><input id="autoSearchOmml" type="checkbox" /></label>
+                <label><span>允许手动选择</span><input id="allowManualOmml" type="checkbox" /></label>
+                <label><span>复制策略</span><select id="ommlCopyStrategy"><option>自动重命名</option><option>覆盖</option><option>跳过</option></select></label>
+                <label><span>手动 OMML 文件</span><input id="manualOmmlPath" type="text" placeholder="/path/OMML2MML.XSL" /></label>
+                <label><span>自定义路径</span><input id="ommlSearchPaths" type="text" placeholder="/path/a, /path/b" /></label>
+                <label><span>扫描文件上限</span><input id="ommlSearchMaxFiles" type="number" /></label>
+              </div>
+            </section>
+            <section class="panel" id="settings-formula">
+              <div class="panel-header">
+                <h2>公式与宏</h2>
+              </div>
+              <div class="settings-grid">
+                <div id="settings-mathtype" class="settings-subtitle">MathType 格式化设置</div>
+                <label><span>MathType 格式化</span><input id="enableMathTypeFormatting" type="checkbox" /></label>
+                <div class="settings-subtitle">公式设置</div>
+                <label><span>公式输出格式</span><select id="formulaOutputFormat"><option>LaTeX+MathML</option><option>LaTeX</option><option>MathML</option><option>图片兜底</option></select></label>
+                <label><span>公式字体</span><input id="formulaFont" type="text" /></label>
+                <label><span>公式字号</span><input id="formulaFontSize" type="number" min="1" /></label>
+                <label><span>格式化范围</span><select id="formulaFormatScope"><option>全文</option><option>当前章节</option><option>选中区域</option><option>单个公式</option></select></label>
+                <label><span>公式对齐</span><select id="formulaAlignment"><option>居中</option><option>左对齐</option><option>右对齐</option></select></label>
+                <label><span>变量样式</span><select id="formulaVariableStyle"><option>斜体</option><option>正体</option></select></label>
+                <label><span>函数样式</span><select id="formulaFunctionStyle"><option>正体</option><option>斜体</option></select></label>
+                <label><span>上下标比例</span><input id="formulaScriptScale" type="number" min="40" max="100" /></label>
+                <label><span>分式样式</span><select id="formulaFractionStyle"><option>标准</option><option>紧凑</option><option>展示型</option></select></label>
+                <label><span>根式样式</span><select id="formulaRadicalStyle"><option>标准</option><option>紧凑</option><option>加长根号</option></select></label>
+                <label><span>矩阵间距</span><select id="formulaMatrixSpacing"><option>标准</option><option>紧凑</option><option>宽松</option></select></label>
+                <label><span>希腊字母</span><select id="formulaGreekStyle"><option>标准</option><option>正体</option><option>斜体</option></select></label>
+                <label><span>行内基线</span><select id="formulaInlineBaseline"><option>跟随正文</option><option>数学轴对齐</option><option>下沉微调</option></select></label>
+                <label><span>独立公式间距</span><select id="formulaDisplaySpacing"><option>标准</option><option>紧凑</option><option>宽松</option></select></label>
+                <label><span>公式编号</span><select id="formulaNumbering"><option>按文档位置</option><option>连续编号</option><option>按章节编号</option><option>不编号</option></select></label>
+                <label><span>置信度阈值</span><input id="formulaConfidenceThreshold" type="number" min="1" max="100" /></label>
+                <label><span>低置信度处理</span><select id="lowConfidenceFormulaStrategy"><option>人工确认</option><option>标记重识别</option><option>跳过</option></select></label>
+                <label><span>保留公式原图</span><input id="keepFormulaImages" type="checkbox" /></label>
+                <label><span>生成公式报告</span><input id="generateFormulaReport" type="checkbox" /></label>
+                <div id="settings-macro" class="settings-subtitle">Word 宏设置</div>
+                <label><span>启用宏检测</span><input id="enableMacroDetection" type="checkbox" /></label>
+                <label><span>启用宏执行队列</span><input id="enableMacroExecution" type="checkbox" /></label>
+                <label><span>允许文档宏</span><input id="allowDocumentMacros" type="checkbox" /></label>
+                <label><span>允许模板宏</span><input id="allowTemplateMacros" type="checkbox" /></label>
+                <label><span>允许本地宏库</span><input id="allowLocalMacroLibrary" type="checkbox" /></label>
+                <label><span>仅允许白名单宏</span><input id="macroWhitelistOnly" type="checkbox" /></label>
+                <label><span>宏白名单</span><input id="macroWhitelist" type="text" placeholder="宏 ID 或名称，用逗号分隔" /></label>
+                <label><span>宏执行前备份</span><input id="macroBackupSettings" type="checkbox" /></label>
+                <label><span>宏失败策略</span><select id="macroFailureStrategySettings"><option>跳过</option><option>停止</option><option>继续</option><option>询问</option></select></label>
+                <label><span>宏超时秒</span><input id="macroTimeoutSeconds" type="number" min="1" /></label>
+                <label><span>允许批量执行宏</span><input id="allowBatchMacroExecution" type="checkbox" /></label>
+              </div>
+            </section>
+            <section class="panel wide-panel">
+              <div class="panel-header">
+                <h2>安装画像</h2>
+                <span>Windows 与 macOS 分开安装</span>
+              </div>
+              <div id="installProfilePanel" class="install-profile"></div>
+            </section>
+            <section class="panel" id="settings-local">
+              <div class="panel-header">
+                <h2>本地连接</h2>
+                <button id="saveSettingsButton" class="primary-button">保存设置</button>
+              </div>
+              <div class="settings-grid">
+                <label><span>启用本地客户端</span><input id="localClientEnabled" type="checkbox" /></label>
+                <label><span>客户端平台</span><select id="localClientPlatform"><option value="auto">自动检测</option><option value="Windows">Windows</option><option value="macOS">macOS</option></select></label>
+                <label><span>本地 API Host</span><input id="localApiHost" type="text" /></label>
+                <label><span>本地 API Port</span><input id="localApiPort" type="number" /></label>
+                <label><span>本地安全令牌</span><input id="localSecurityToken" type="password" autocomplete="new-password" placeholder="留空则不启用" /></label>
+                <label><span>允许网页唤起客户端</span><input id="allowWebLaunchLocalClient" type="checkbox" /></label>
+                <label><span>任务状态同步云端</span><input id="allowTaskStatusCloudSync" type="checkbox" /></label>
+                <label><span>显示本地路径</span><input id="exposeLocalPaths" type="checkbox" /></label>
+                <label><span>MathType 兼容</span><select id="mathtypeCompatibilityMode"><option value="platform-specific">区分平台</option><option value="mathml-latex">MathML/LaTeX 优先</option><option value="image-fallback">图片兜底</option></select></label>
+                <label><span>敏感文档本地优先</span><input id="sensitiveFilesPreferLocal" type="checkbox" /></label>
+              </div>
+            </section>
+            <section class="panel wide-panel local-handoff-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>本地任务交接</h2>
+                  <span id="localHandoffScope">等待本地任务</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="tasks" type="button">查看任务</button>
+              </div>
+              <div id="localHandoffPanel" class="local-handoff-grid"></div>
+            </section>
+            <section class="panel wide-panel risk-register-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>风险控制</h2>
+                  <span id="riskRegisterScope">按 PRD 风险项检查</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="tasks" type="button">查看报告</button>
+              </div>
+              <div id="riskRegisterPanel" class="risk-register-grid"></div>
+            </section>
+            <section class="panel wide-panel performance-target-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>性能指标</h2>
+                  <span id="performanceTargetScope">按 PRD 性能目标检查</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="tasks" type="button">查看任务耗时</button>
+              </div>
+              <div id="performanceTargetPanel" class="performance-target-grid"></div>
+            </section>
+            <section class="panel wide-panel exception-policy-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>异常处理</h2>
+                  <span id="exceptionPolicyScope">按 PRD 异常策略检查</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="tasks" type="button">查看失败清单</button>
+              </div>
+              <div id="exceptionPolicyPanel" class="exception-policy-grid"></div>
+            </section>
+            <section class="panel wide-panel acceptance-overview-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>验收总览</h2>
+                  <span id="acceptanceOverviewScope">按 PRD 17 章汇总</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="menu" type="button">打开菜单结构</button>
+              </div>
+              <div id="acceptanceOverviewPanel" class="acceptance-overview-grid"></div>
+            </section>
+            <section class="panel wide-panel acceptance-matrix-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>验收证据矩阵</h2>
+                  <span id="acceptanceMatrixScope">逐条核查 PRD 第 17 章</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="tasks" type="button">查看报告</button>
+              </div>
+              <div id="acceptanceMatrixPanel" class="acceptance-matrix-grid"></div>
+            </section>
+            <section class="panel wide-panel version-roadmap-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>版本路线图</h2>
+                  <span id="versionRoadmapScope">按 PRD 18 章规划</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="menu" type="button">查看菜单</button>
+              </div>
+              <div id="versionRoadmapPanel" class="version-roadmap-grid"></div>
+            </section>
+            <section class="panel wide-panel data-dictionary-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>数据字典</h2>
+                  <span id="dataDictionaryScope">按 PRD 10 章字段核对</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="tasks" type="button">查看记录</button>
+              </div>
+              <div id="dataDictionaryPanel" class="data-dictionary-grid"></div>
+            </section>
+            <section class="panel wide-panel security-privacy-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>安全与隐私</h2>
+                  <span id="securityPrivacyScope">按 PRD 13 章核查</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="settings" type="button">查看设置</button>
+              </div>
+              <div id="securityPrivacyPanel" class="security-privacy-grid"></div>
+            </section>
+            <section class="panel wide-panel compatibility-matrix-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>兼容性矩阵</h2>
+                  <span id="compatibilityMatrixScope">按 PRD 15 章核查</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="settings" type="button">切换平台</button>
+              </div>
+              <div id="compatibilityMatrixPanel" class="compatibility-matrix-grid"></div>
+            </section>
+            <section class="panel wide-panel architecture-blueprint-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>技术架构</h2>
+                  <span id="architectureBlueprintScope">按 PRD 16 章核查</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="settings" type="button">查看本地设置</button>
+              </div>
+              <div id="architectureBlueprintPanel" class="architecture-blueprint-grid"></div>
+            </section>
+            <section class="panel wide-panel api-catalog-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>开放 API</h2>
+                  <span id="apiCatalogScope">按 V3.0 接口开放规划核查</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="settings" type="button">查看令牌设置</button>
+              </div>
+              <div id="apiCatalogPanel" class="api-catalog-grid"></div>
+            </section>
+            <section class="panel wide-panel product-summary-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>产品总结</h2>
+                  <span id="productSummaryScope">按 PRD 21 章核查</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="menu" type="button">查看菜单</button>
+              </div>
+              <div id="productSummaryPanel" class="product-summary-grid"></div>
+            </section>
+            <section class="panel wide-panel enhancement-plan-panel">
+              <div class="panel-header">
+                <div>
+                  <h2>智能增强规划</h2>
+                  <span id="enhancementPlanScope">按 V3.0 增强能力核查</span>
+                </div>
+                <button class="secondary-button" data-view-shortcut="reports" type="button">查看报告</button>
+              </div>
+              <div id="enhancementPlanPanel" class="enhancement-plan-grid"></div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <template id="emptyTemplate">
+      <tr><td colspan="11" class="empty-state">暂无数据</td></tr>
+    </template>
+    <script src="/app.js" type="module"></script>
+  </body>
+</html>

@@ -1,0 +1,10 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.venv/
+.k12-data/
+.coverage
+htmlcov/
+node_modules/
+dist/
+

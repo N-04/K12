@@ -1,0 +1,14 @@
+[project]
+name = "k12"
+version = "0.1.0"
+description = "Local-first document processing workbench for office, teaching, and research workflows."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+k12-local-client = "k12.local_client:main"
+
+[tool.k12]
+default_host = "127.0.0.1"
+default_port = 8765

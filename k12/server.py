@@ -56,6 +56,7 @@ class JsonError(Exception):
     """HTTP-facing error with a status code and user-readable message."""
 
     def __init__(self, status: int, message: str) -> None:
+        """Store the HTTP status and response message for JSON error replies."""
         super().__init__(message)
         self.status = status
         self.message = message
@@ -212,6 +213,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def _handle_api_get(self, path: str, query: dict[str, list[str]]) -> None:
+        """Dispatch authorized GET routes for browser, report, installer, and local-client reads."""
         if path == "/api/health":
             self._json({"status": "ok", "service": "K12", "version": "0.1.0"})
         elif path == "/api/files":
@@ -368,6 +370,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             raise JsonError(404, "Not found")
 
     def _handle_api_post(self, path: str, payload: dict) -> None:
+        """Dispatch authorized POST routes for uploads, tasks, annotations, sync, and settings."""
         if path == "/api/files":
             try:
                 if "files" in payload:
@@ -568,6 +571,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             raise JsonError(401, "本地 API 安全令牌无效或缺失")
 
     def _ensure_logged_in(self, path: str, method: str) -> None:
+        """Require an active local user session when the workspace enables login."""
         if not path.startswith("/api/"):
             return
         if not self.store.get_settings().get("requireLogin", False):
@@ -580,11 +584,13 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             raise JsonError(401, "请先登录后再访问本地 API")
 
     def _ensure_local_payload_token_configured(self) -> None:
+        """Block local task payload reads until a local security token exists."""
         expected = str(self.store.get_settings().get("localSecurityToken") or "").strip()
         if not expected:
             raise JsonError(403, "本地任务载荷包含本地路径，请先配置本地安全令牌")
 
     def _read_json(self) -> dict:
+        """Read one JSON request body and map parse failures to a JSON API error."""
         length = int(self.headers.get("Content-Length") or 0)
         if length == 0:
             return {}
@@ -595,6 +601,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             raise JsonError(400, "Invalid JSON") from exc
 
     def _read_multipart_uploads(self) -> list[dict]:
+        """Parse multipart file uploads while enforcing the configured size limit."""
         content_type = self.headers.get("Content-Type") or ""
         match = re.search(r"boundary=([^;]+)", content_type)
         if not match:
@@ -627,6 +634,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         return uploads
 
     def _send_report_file(self, report: dict, file_format: str) -> None:
+        """Stream one generated report format from the managed report paths."""
         choices = {
             "json": ("json_path", "application/json; charset=utf-8"),
             "html": ("html_path", "text/html; charset=utf-8"),
@@ -648,6 +656,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_source_file(self, file_id: str) -> None:
+        """Stream a registered source file through the processor download contract."""
         try:
             info = self.processor.file_download_info(file_id)
         except KeyError as exc:
@@ -667,6 +676,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_installer(self, file_name: str, query: dict[str, list[str]] | None = None) -> None:
+        """Stream a registered Windows or macOS installer with MathType boundary headers."""
         try:
             requested_platform = (query or {}).get("platform", [None])[0]
             info = self.processor.installer_download_info(file_name, requested_platform)
@@ -686,11 +696,14 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.send_header("X-K12-Platform", str(info.get("platform") or ""))
         self.send_header("X-K12-Installer-Kind", str(info.get("installer_kind") or ""))
         self.send_header("X-K12-Package-Boundary", str(info.get("package_boundary_header") or ""))
+        self.send_header("X-K12-Formula-Object-Boundary", str(info.get("formula_object_boundary_header") or ""))
+        self.send_header("X-K12-Formula-Fallback-Formats", str(info.get("fallback_formats_header") or "MathML,LaTeX,image"))
         self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
         self.end_headers()
         self.wfile.write(data)
 
     def _send_files_bundle(self, query: dict[str, list[str]]) -> None:
+        """Build a ZIP of selected source files plus a manifest of successes and failures."""
         ids = self._query_ids(query)
         file_type = query.get("type", [""])[0]
         if ids:
@@ -735,6 +748,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_image_asset(self, asset_path: str) -> None:
+        """Serve cached report images only when they stay inside the managed image root."""
         root = self.store.images_dir.resolve()
         target = (self.store.data_dir / asset_path).resolve()
         try:
@@ -753,6 +767,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_replacement_asset(self, file_name: str) -> None:
+        """Serve one uploaded replacement asset from the managed upload cache."""
         safe_name = Path(file_name).name
         root = self.store.uploads_dir.resolve()
         target = (root / safe_name).resolve()
@@ -772,6 +787,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_artifact(self, path: str) -> None:
+        """Serve successful task artifacts only when a report registered the output."""
         parts = path.strip("/").split("/")
         if len(parts) < 3:
             raise JsonError(404, "Artifact not found")
@@ -791,25 +807,25 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _find_artifact_path(self, task_id: str, file_name: str) -> Path:
+        """Find a successful artifact path from reports without trusting URL paths."""
         for report in self.store.list_reports():
             if report.get("task_id") != task_id:
                 continue
             for artifact in report.get("analysis", {}).get("artifacts", []):
                 candidate = Path(artifact.get("path") or "")
-                if artifact.get("file_name") == file_name and candidate.exists() and candidate.is_file():
+                artifact_task_id = str(artifact.get("task_id") or task_id)
+                if (
+                    artifact_task_id == task_id
+                    and artifact.get("status") == "成功"
+                    and artifact.get("file_name") == file_name
+                    and candidate.exists()
+                    and candidate.is_file()
+                ):
                     return candidate.resolve()
-        for root in (self.store.output_task_dir(task_id), self.store.outputs_dir / task_id):
-            resolved_root = root.resolve()
-            target = (resolved_root / file_name).resolve()
-            try:
-                target.relative_to(resolved_root)
-            except ValueError:
-                continue
-            if target.exists() and target.is_file():
-                return target
         raise JsonError(404, "Artifact not found")
 
     def _send_task_bundle(self, task_id: str) -> None:
+        """Build a task result ZIP containing reports, logs, and registered outputs."""
         task = self.store.get_task(task_id)
         if not task:
             raise JsonError(404, "Task not found")
@@ -836,6 +852,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_report_images(self, report_id: str) -> None:
+        """Build the small-image ZIP export with annotations and a manifest CSV."""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -897,6 +914,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_report_image_manifest_xlsx(self, report_id: str) -> None:
+        """Stream the small-image manifest workbook for one report."""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -911,6 +929,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_report_formulas(self, report_id: str) -> None:
+        """Stream the formula ZIP export with MathML, TEX, JSON, and annotations."""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -925,6 +944,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_report_formula_xlsx(self, report_id: str) -> None:
+        """Stream the formula workbook export for one report."""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -939,6 +959,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_report_failures(self, report_id: str) -> None:
+        """Stream the standard failure-list CSV for one report."""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -953,6 +974,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_report_omml_failures(self, report_id: str) -> None:
+        """Stream OMML dependency and conversion failure rows with path redaction settings."""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -968,6 +990,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_report_macro_failures(self, report_id: str) -> None:
+        """Stream macro failure rows with backup and restore guidance."""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -982,6 +1005,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_logs_file(self, task_id: str | None = None, export_format: str | None = None) -> None:
+        """Export redacted task or system logs in the requested safe format."""
         logs = self.store.list_logs(task_id, limit=5000)
         public_logs = [self._public_log(item) for item in reversed(logs)]
         export_format = self._log_export_format(export_format)
@@ -1002,10 +1026,12 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _log_export_format(self, requested: str | None) -> str:
+        """Normalize log download formats to the supported extension set."""
         value = str(requested or self.store.get_settings().get("logExportFormat", "txt") or "txt").lower()
         return value if value in {"txt", "log", "csv", "json"} else "txt"
 
     def _log_export_bytes(self, logs: list[dict], export_format: str) -> bytes:
+        """Render public log rows as JSON, CSV, or plain text bytes."""
         if export_format == "json":
             return json.dumps({"logs": logs}, ensure_ascii=False, indent=2).encode("utf-8")
         if export_format == "csv":
@@ -1032,6 +1058,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _add_bundle_path(archive: zipfile.ZipFile, path: Path, folder: str, added: set[str]) -> None:
+        """Add one existing file to a ZIP folder while avoiding duplicate names."""
         if not path.exists() or not path.is_file():
             return
         name = f"{folder}/{path.name}"
@@ -1042,6 +1069,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _query_ids(query: dict[str, list[str]]) -> list[str]:
+        """Return de-duplicated ids parsed from repeated or comma-separated query values."""
         ids: list[str] = []
         for raw in query.get("ids", []):
             ids.extend(item.strip() for item in raw.split(",") if item.strip())
@@ -1049,6 +1077,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _unique_zip_name(name: str, added: set[str]) -> str:
+        """Reserve a safe unique ZIP entry name under the requested folder."""
         safe = "/".join(Path(part).name for part in name.split("/") if part)
         path = Path(safe)
         candidate = safe
@@ -1061,11 +1090,13 @@ class K12RequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _csv_cell(value: object) -> str:
+        """Quote one CSV cell without relying on platform-specific csv dialect state."""
         text = str(value).replace('"', '""')
         return f'"{text}"'
 
     @staticmethod
     def _small_image_kind(image: dict) -> str:
+        """Classify a small image for exports using the PRD review categories."""
         if image.get("is_formula_like"):
             return "公式"
         if image.get("is_qrcode_like"):
@@ -1111,6 +1142,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         return public
 
     def _public_log(self, log: dict) -> dict:
+        """Return one log row with local paths redacted unless explicitly allowed."""
         if self.store.get_settings().get("exposeLocalPaths", False):
             return dict(log)
         item = dict(log)
@@ -1119,6 +1151,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _redacted_path_label(value: object) -> str:
+        """Replace a local path with a stable filename-only redaction label."""
         if not value:
             return ""
         name = Path(str(value)).name
@@ -1126,6 +1159,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
 
     @classmethod
     def _redact_text_paths(cls, text: str) -> str:
+        """Redact common macOS, Linux, and Windows absolute paths from log text."""
         pattern = r"(/Users/[^\s，,;]+|/private/[^\s，,;]+|/var/folders/[^\s，,;]+|/tmp/[^\s，,;]+|[A-Za-z]:\\[^\s，,;]+)"
         return re.sub(pattern, lambda match: cls._redacted_path_label(match.group(0)), text)
 
@@ -1136,6 +1170,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         return name.replace("\r", "_").replace("\n", "_").replace('"', "_")
 
     def _json(self, payload: dict, status: int = 200) -> None:
+        """Send one JSON response with common CORS headers."""
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1145,11 +1180,13 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_common_headers(self) -> None:
+        """Attach CORS headers used by the local browser UI and companion client."""
         self.send_header("Access-Control-Allow-Origin", self._cors_origin())
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-K12-Token, Authorization")
 
     def _cors_origin(self) -> str:
+        """Allow only localhost-style origins for browser access to the local API."""
         origin = self.headers.get("Origin") or ""
         if re.fullmatch(r"http://(127\.0\.0\.1|localhost)(:\d+)?", origin):
             return origin
@@ -1164,6 +1201,7 @@ class K12Server(ThreadingHTTPServer):
     """Threaded local server that owns one AppStore and TaskProcessor."""
 
     def __init__(self, server_address: tuple[str, int], handler_class: type[K12RequestHandler], data_dir: Path) -> None:
+        """Create the runtime store, processor, recovery pass, and cleanup pass."""
         super().__init__(server_address, handler_class)
         self.store = AppStore(data_dir)
         self.processor = TaskProcessor(self.store)

@@ -52,6 +52,8 @@ const state = {
   localToken: readStoredToken(),
 };
 
+let plannerPointerDrag = null;
+
 const taskSpecs = {
   word_to_ppt: {
     label: "Word 转 PPT",
@@ -69,10 +71,10 @@ const taskSpecs = {
   },
   pdf_to_word: {
     label: "PDF 转 Word",
-    mode: "web",
+    mode: "hybrid",
     inputs: ["PDF"],
     output: "Word",
-    description: "识别文本型、扫描型和混合型 PDF，可接入 Mathpix",
+    description: "Mathpix 识别 PDF，公式 OCR 后进入本地 MathType 后处理",
   },
   excel_to_pdf: {
     label: "Excel 转 PDF",
@@ -661,6 +663,7 @@ const dataDictionary = [
       ["task_type", "string", "任务类型"],
       ["execute_mode", "string", "local / web / hybrid"],
       ["file_ids", "array", "文件 ID 列表"],
+      ["options", "object", "任务参数，包含 k12.workflowPlan.v1 流程顺序"],
       ["status", "string", "任务状态"],
       ["progress", "number", "进度"],
       ["input_path", "string", "输入路径"],
@@ -691,6 +694,26 @@ const dataDictionary = [
       ["format_status", "string", "是否已格式化"],
       ["confidence", "number", "置信度"],
       ["status", "string", "成功 / 失败 / 待确认"],
+    ],
+  },
+  {
+    key: "formula_annotations",
+    name: "FormulaAnnotation",
+    title: "公式人工校正对象",
+    privacy: "重识别请求只保存授权门槛、阻断原因和下一步，不保存 Mathpix 凭证值",
+    fields: [
+      ["id", "string", "校正记录 ID"],
+      ["formula_id", "string", "公式 ID"],
+      ["report_id", "string", "报告 ID"],
+      ["status", "string", "已确认 / 已修正 / 重新识别 / 跳过"],
+      ["latex", "string", "人工修正 LaTeX"],
+      ["mathml", "string", "人工修正 MathML"],
+      ["retry_recognition", "boolean", "是否请求重新识别"],
+      ["recognition_status", "string", "重识别请求状态"],
+      ["recognition_request", "object", "k12.formulaRecognitionRequest.v1 请求合同"],
+      ["next_step", "string", "下一步处理建议"],
+      ["note", "string", "人工备注"],
+      ["updated_at", "datetime", "更新时间"],
     ],
   },
   {
@@ -1195,20 +1218,19 @@ function renderTaskPlanner() {
   const tasks = orderedPlannerTasks(files);
   $("#plannerScope").textContent = files.length ? `${files.length} 个文件` : "未选择文件";
   $("#taskPlanner").innerHTML = tasks
-    .map((taskType, index) => {
+    .map((taskType) => {
       const spec = taskSpecs[taskType];
       const mode = resolveExecuteMode(taskType, files);
       return `<article class="planner-item" data-task="${taskType}">
-        <button type="button" class="planner-drag-handle" draggable="true" data-task="${taskType}" title="拖拽调整流程顺序" aria-label="拖拽调整流程顺序">${lineIcon("drag-lines", "drag-line-icon")}</button>
-        <div>
+        <button type="button" class="planner-drag-handle" draggable="true" data-task="${taskType}" title="拖拽或用方向键调整流程顺序" aria-label="拖拽或用方向键调整流程顺序">${lineIcon("drag-lines", "drag-line-icon")}</button>
+        <span class="planner-enabled-check" title="已加入处理流程" aria-label="已加入处理流程" role="img">${lineIcon("check", "planner-check-icon")}</span>
+        <div class="planner-copy">
           <strong>${spec.label}</strong>
           <small>${spec.description}</small>
           <span class="badge ${modeClass(mode)}">${modeLabels[mode]}</span>
           <span class="badge blue">${spec.output}</span>
         </div>
         <div class="planner-actions">
-          <button class="icon-button planner-icon-button planner-up" data-task="${taskType}" ${index === 0 ? "disabled" : ""} title="上移" aria-label="上移">${lineIcon("arrow-up")}</button>
-          <button class="icon-button planner-icon-button planner-down" data-task="${taskType}" ${index === tasks.length - 1 ? "disabled" : ""} title="下移" aria-label="下移">${lineIcon("arrow-down")}</button>
           <button class="mini-button planner-task" data-task="${taskType}">使用</button>
         </div>
       </article>`;
@@ -1220,6 +1242,7 @@ function lineIcon(name, className = "") {
   const icons = {
     "drag-lines": '<path d="M7 7h10"></path><path d="M7 12h10"></path><path d="M7 17h10"></path>',
     grip: '<path d="M8 5h8M8 10h8M8 15h8"></path>',
+    check: '<path d="m6 12 4 4 8-9"></path>',
     "arrow-right": '<path d="M5 12h14"></path><path d="m13 6 6 6-6 6"></path>',
     "arrow-up": '<path d="M12 19V5"></path><path d="m6 11 6-6 6 6"></path>',
     "arrow-down": '<path d="M12 5v14"></path><path d="m18 13-6 6-6-6"></path>',
@@ -1256,7 +1279,9 @@ function renderRouteAdvisor() {
 function renderSelectionBar() {
   const selected = selectedFileObjects();
   const bar = $("#selectionBar");
+  const toolbarCount = $("#toolbarSelectionCount");
   const issues = selected.flatMap((file) => file.validation_errors || []);
+  if (toolbarCount) toolbarCount.textContent = `已选择 ${selected.length} 个文件`;
   if (!selected.length) {
     bar.classList.add("muted");
     $("#selectionTitle").textContent = "未选择文件";
@@ -1903,11 +1928,35 @@ function renderLogTarget(target, logs, emptyText) {
   }
   target.innerHTML = logs
     .slice(0, 36)
-    .map((log) => `<div class="log-item ${escapeHtml(log.level)}">
-      <span>${escapeHtml(log.message)}</span>
-      <small>${formatTime(log.created_at)} · ${escapeHtml(log.category || "system")} · ${escapeHtml(log.level)}</small>
-    </div>`)
+    .map((log) => {
+      const levelClass = logLevelClass(log.level);
+      return `<div class="log-item structured-log-item ${levelClass}">
+      <span class="log-line-time">${formatTime(log.created_at)}</span>
+      <span class="log-level-chip ${levelClass}">${escapeHtml(logLevelLabel(levelClass))}</span>
+      <span class="log-line-message">${escapeHtml(log.message)}</span>
+      <small>${escapeHtml(log.category || "system")}</small>
+    </div>`;
+    })
     .join("");
+}
+
+function logLevelClass(level) {
+  const normalized = String(level || "info").toLowerCase();
+  if (["error", "warning", "warn", "success", "done", "completed", "info"].includes(normalized)) {
+    if (normalized === "warn") return "warning";
+    if (["done", "completed"].includes(normalized)) return "success";
+    return normalized;
+  }
+  return "info";
+}
+
+function logLevelLabel(level) {
+  return {
+    error: "错误",
+    warning: "警告",
+    success: "完成",
+    info: "信息",
+  }[level] || "信息";
 }
 
 function renderWorkspaceProgress() {
@@ -2009,6 +2058,8 @@ function renderInstallProfile() {
   const readiness = plan.readiness || [];
   const steps = plan.steps || [];
   const formulaContract = plan.formula_compatibility || {};
+  const contractBlockers = formulaContract.native_handoff_blocking_reasons || [];
+  const manifestInstaller = state.localClientManifest?.platform?.installer || {};
   const warnings = plan.warnings || [];
   const routes = Object.entries(profile.taskRouting || {}).slice(0, 6);
   target.innerHTML = `<div class="profile-summary">
@@ -2041,7 +2092,7 @@ function renderInstallProfile() {
   <section class="install-contract-card">
     <div class="object-title">
       <strong>公式交付合同</strong>
-      <span class="badge ${formulaContract.native_mathtype_object_allowed ? "warn" : "good"}">${escapeHtml(formulaContract.status || "跨平台兜底")}</span>
+      <span class="badge ${installContractBadgeClass(formulaContract)}">${escapeHtml(formulaContract.status || "跨平台兜底")}</span>
     </div>
     <div class="install-contract-grid">
       <div><span>目标平台</span><strong>${escapeHtml(formulaContract.target_platform || profile.platform || "-")}</strong></div>
@@ -2049,7 +2100,39 @@ function renderInstallProfile() {
       <div><span>对象格式</span><strong>${escapeHtml(formulaContract.native_object_format || profile.mathtypeObjectFormat || "-")}</strong></div>
       <div><span>兜底格式</span><strong>${escapeHtml((formulaContract.fallback_formats || ["MathML", "LaTeX", "图片"]).join(" / "))}</strong></div>
     </div>
+    <div class="install-boundary-grid">
+      <div>
+        <span>同平台要求</span>
+        <strong>${formulaContract.same_platform_required_for_native_objects ? "必须同平台" : "使用兜底格式"}</strong>
+      </div>
+      <div>
+        <span>原生交接</span>
+        <strong>${formulaContract.native_handoff_allowed ? "允许" : "阻止"}</strong>
+      </div>
+      <div>
+        <span>阻断原因</span>
+        <strong>${escapeHtml(contractBlockers.length ? contractBlockers.join(" / ") : "无")}</strong>
+      </div>
+      <div>
+        <span>安装包边界</span>
+        <strong>${escapeHtml(formulaContract.package_boundary || "Windows .msi 与 macOS .pkg 不能混用")}</strong>
+      </div>
+    </div>
     <p>${escapeHtml(formulaContract.message || profile.formulaPortability || "")}</p>
+    <p class="install-contract-action">${escapeHtml(formulaContract.recommended_action || "跨平台交付时保留 MathML、LaTeX 或图片兜底。")}</p>
+  </section>
+  <section class="installer-manifest-card">
+    <div class="object-title">
+      <strong>本地客户端安装清单</strong>
+      <span class="badge ${manifestInstaller.download_url ? "good" : "blue"}">${escapeHtml(manifestInstaller.status || packageInfo.status || "待打包")}</span>
+    </div>
+    <div class="install-contract-grid">
+      <div><span>清单版本</span><strong>${escapeHtml(manifestInstaller.schema_version || "k12.localInstallerManifest.v1")}</strong></div>
+      <div><span>平台 query</span><strong>${manifestInstaller.download_requires_platform_query ? "必须携带" : "无可下载包"}</strong></div>
+      <div><span>校验要求</span><strong>${manifestInstaller.checksum_required ? "必须校验 SHA256" : "等待安装包"}</strong></div>
+      <div><span>路径策略</span><strong>${escapeHtml(manifestInstaller.path_policy || "安装包路径不写入 manifest")}</strong></div>
+    </div>
+    <p>${escapeHtml(manifestInstaller.formula_object_boundary || formulaContract.package_boundary || "Windows .msi 与 macOS .pkg、MathType 原生对象不能跨平台混用。")}</p>
   </section>
   <div class="install-warning-list">
     ${warnings.map((warning) => `<small>${escapeHtml(warning)}</small>`).join("")}
@@ -2781,10 +2864,27 @@ function renderAcceptanceOverview() {
 function renderAcceptanceMatrix() {
   const target = $("#acceptanceMatrixPanel");
   if (!target) return;
+  const riskTarget = $("#acceptanceRiskPanel");
   const matrix = state.acceptanceMatrix || {};
   const groups = matrix.groups || [];
   const summary = matrix.summary || {};
-  $("#acceptanceMatrixScope").textContent = `${summary.covered || 0} / ${summary.items || 0} 项已覆盖，${summary.contract || 0} 项需实测`;
+  const risks = matrix.uncovered_risks || [];
+  $("#acceptanceMatrixScope").textContent = `${summary.covered || 0} / ${summary.items || 0} 项已覆盖，${summary.contract || 0} 项需实测，${risks.length || 0} 条未覆盖风险`;
+  if (riskTarget) {
+    riskTarget.innerHTML = risks.length
+      ? risks
+          .map((item) => `<article class="acceptance-risk-card">
+            <div class="object-title">
+              <strong>${escapeHtml(item.key)} ${escapeHtml(item.requirement)}</strong>
+              <span class="badge warn">${escapeHtml(item.status)}</span>
+            </div>
+            <p>${escapeHtml(item.uncovered_risk || "未覆盖风险待补充")}</p>
+            <small>阻断：${escapeHtml((item.blocking_reasons || []).join(" / ") || "待确认")}</small>
+            <small>环境：${escapeHtml((item.required_environment || []).join(" / ") || "待确认")}</small>
+          </article>`)
+          .join("")
+      : "";
+  }
   if (!groups.length) {
     target.innerHTML = '<div class="empty-state-mini">暂无验收证据矩阵</div>';
     return;
@@ -2849,8 +2949,8 @@ function acceptanceGroupState(key) {
     return {
       covered: settings.autoSearchOmml && settings.allowManualOmml ? 9 : 8,
       level: "warn",
-      status: "本地实测",
-      current: `OMML 文件 ${ommlFiles} 个，自动检索 ${settings.autoSearchOmml ? "开启" : "关闭"}，手动选择 ${settings.allowManualOmml ? "开启" : "关闭"}；真实转换由本地客户端完成`,
+      status: "交接覆盖",
+      current: `OMML 文件 ${ommlFiles} 个，自动检索 ${settings.autoSearchOmml ? "开启" : "关闭"}，手动选择 ${settings.allowManualOmml ? "开启" : "关闭"}；真实 OMML 转 MathType 需本地客户端实测`,
     };
   }
   if (key === "macro") {
@@ -2858,8 +2958,8 @@ function acceptanceGroupState(key) {
     return {
       covered: settings.macroBackup ? 9 : 8,
       level: "warn",
-      status: "本地实测",
-      current: `宏记录 ${macroReports} 条，备份 ${settings.macroBackup ? "开启" : "关闭"}，失败策略 ${settings.macroFailureStrategy || "跳过"}；网页端只生成本地队列`,
+      status: "交接覆盖",
+      current: `宏记录 ${macroReports} 条，备份 ${settings.macroBackup ? "开启" : "关闭"}，失败策略 ${settings.macroFailureStrategy || "跳过"}；网页端只生成本地队列，真实宏执行需本地客户端实测`,
     };
   }
   if (key === "ppt") {
@@ -2884,7 +2984,7 @@ function acceptanceGroupState(key) {
     return {
       covered: settings.enableMathTypeFormatting ? 9 : 7,
       level: "warn",
-      status: "本地实测",
+      status: "需本地客户端实测",
       current: `格式化 ${settings.enableMathTypeFormatting ? "开启" : "关闭"}，兼容模式 ${compatibilityLabel(settings.mathtypeCompatibilityMode)}；真实 MathType 对象写回需本地客户端`,
     };
   }
@@ -3182,7 +3282,7 @@ function compatibilityMatrixState(key) {
   if (key === "office_suite") {
     const status = cap.officeAutomation?.status || profile.officeAutomation || "等待本地能力检测";
     if (profile.capabilities?.officeAutomation) {
-      return { level: "warn", status: "本地实测", current: `${status}；真实桌面 Office/WPS/LibreOffice 兼容仍由本地客户端预检确认` };
+      return { level: "warn", status: "需本地组件实测", current: `${status}；真实桌面 Office/WPS/LibreOffice 兼容仍由本地客户端预检确认` };
     }
     return { level: "warn", status: "受限", current: `${status}；当前网页端保留解析、转换合同和本地客户端交接，不直接声明桌面 Office 自动化已跑通` };
   }
@@ -5633,6 +5733,17 @@ function bindEvents() {
     }
   });
 
+  if (window.PointerEvent) {
+    document.addEventListener("pointerdown", startPlannerPointerDrag);
+    document.addEventListener("pointermove", updatePlannerPointerDrag);
+    document.addEventListener("pointerup", finishPlannerPointerDrag);
+    document.addEventListener("pointercancel", cancelPlannerPointerDrag);
+  } else {
+    document.addEventListener("mousedown", startPlannerPointerDrag);
+    document.addEventListener("mousemove", updatePlannerPointerDrag);
+    document.addEventListener("mouseup", finishPlannerPointerDrag);
+  }
+
   document.addEventListener("dragstart", (event) => {
     const macroItem = event.target.closest(".macro-order-item");
     if (macroItem) {
@@ -5681,6 +5792,7 @@ function bindEvents() {
     $$(".planner-item.dragging").forEach((item) => item.classList.remove("dragging"));
     $$(".macro-order-item.dragging").forEach((item) => item.classList.remove("dragging"));
   });
+  document.addEventListener("keydown", handlePlannerHandleKeydown);
 
   document.addEventListener("click", async (event) => {
     const button = event.target.closest("button");
@@ -6044,6 +6156,17 @@ function movePlannerTask(taskType, direction) {
   renderRouteAdvisor();
 }
 
+function movePlannerTaskToIndex(taskType, targetIndex) {
+  const tasks = orderedPlannerTasks(contextualFiles());
+  const index = tasks.indexOf(taskType);
+  if (index < 0 || targetIndex < 0 || targetIndex >= tasks.length || index === targetIndex) return;
+  const [task] = tasks.splice(index, 1);
+  tasks.splice(targetIndex, 0, task);
+  state.plannerOrder = tasks;
+  renderTaskPlanner();
+  renderRouteAdvisor();
+}
+
 function movePlannerTaskBefore(sourceTask, targetTask, placement = "before") {
   if (!sourceTask || !targetTask || sourceTask === targetTask) return;
   const current = orderedPlannerTasks(contextualFiles());
@@ -6058,6 +6181,88 @@ function movePlannerTaskBefore(sourceTask, targetTask, placement = "before") {
   renderRouteAdvisor();
 }
 
+function handlePlannerHandleKeydown(event) {
+  if (!(event.target instanceof Element)) return;
+  const handle = event.target.closest(".planner-drag-handle");
+  const taskType = handle?.dataset.task || "";
+  if (!taskType) return;
+  const tasks = orderedPlannerTasks(contextualFiles());
+  if (!tasks.includes(taskType)) return;
+  if (event.key === "ArrowUp") movePlannerTask(taskType, -1);
+  else if (event.key === "ArrowDown") movePlannerTask(taskType, 1);
+  else if (event.key === "Home") movePlannerTaskToIndex(taskType, 0);
+  else if (event.key === "End") movePlannerTaskToIndex(taskType, tasks.length - 1);
+  else return;
+  event.preventDefault();
+  focusPlannerHandle(taskType);
+}
+
+function focusPlannerHandle(taskType) {
+  window.requestAnimationFrame(() => {
+    // Re-render replaces buttons, so restore focus on the matching handle.
+    $$(".planner-drag-handle").find((button) => button.dataset.task === taskType)?.focus();
+  });
+}
+
+function startPlannerPointerDrag(event) {
+  const handle = event.target.closest(".planner-drag-handle");
+  const item = handle?.closest(".planner-item");
+  if (!item) return;
+  if ("button" in event && event.button !== 0) return;
+  event.preventDefault();
+  handle.setPointerCapture?.(event.pointerId);
+  plannerPointerDrag = {
+    active: false,
+    handle,
+    item,
+    pointerId: event.pointerId,
+    startY: event.clientY,
+    task: item.dataset.task || "",
+  };
+}
+
+function updatePlannerPointerDrag(event) {
+  if (!plannerPointerDrag || !samePlannerPointer(event)) return;
+  const distance = Math.abs(event.clientY - plannerPointerDrag.startY);
+  if (!plannerPointerDrag.active && distance < 4) return;
+  plannerPointerDrag.active = true;
+  plannerPointerDrag.item.classList.add("dragging");
+  event.preventDefault();
+  const target = plannerDropItemAt(event.clientX, event.clientY);
+  if (target) markPlannerDropTarget(target, event.clientY);
+}
+
+function finishPlannerPointerDrag(event) {
+  if (!plannerPointerDrag || !samePlannerPointer(event)) return;
+  const drag = plannerPointerDrag;
+  if (drag.active) {
+    event.preventDefault();
+    const target = plannerDropItemAt(event.clientX, event.clientY);
+    if (target) movePlannerTaskBefore(drag.task, target.dataset.task || "", plannerDropPlacement(target, event.clientY));
+  }
+  drag.handle.releasePointerCapture?.(drag.pointerId);
+  cancelPlannerPointerDrag();
+}
+
+function cancelPlannerPointerDrag() {
+  resetPlannerDropTargets();
+  $$(".planner-item.dragging").forEach((item) => item.classList.remove("dragging"));
+  plannerPointerDrag = null;
+}
+
+function samePlannerPointer(event) {
+  return plannerPointerDrag.pointerId === undefined || event.pointerId === undefined || event.pointerId === plannerPointerDrag.pointerId;
+}
+
+function plannerDropItemAt(clientX, clientY) {
+  return document.elementFromPoint(clientX, clientY)?.closest(".planner-item");
+}
+
+function plannerDropPlacement(item, clientY) {
+  const rect = item.getBoundingClientRect();
+  return clientY > rect.top + rect.height / 2 ? "after" : "before";
+}
+
 function resetPlannerDropTargets() {
   $$(".planner-item.drop-before, .planner-item.drop-after").forEach((item) => {
     item.classList.remove("drop-before", "drop-after");
@@ -6066,8 +6271,7 @@ function resetPlannerDropTargets() {
 
 function markPlannerDropTarget(item, clientY) {
   resetPlannerDropTargets();
-  const rect = item.getBoundingClientRect();
-  const placement = clientY > rect.top + rect.height / 2 ? "after" : "before";
+  const placement = plannerDropPlacement(item, clientY);
   item.classList.add(placement === "after" ? "drop-after" : "drop-before");
 }
 
@@ -6151,6 +6355,15 @@ function compatibilityLabel(mode) {
     "mathml-latex": "MathML/LaTeX 优先",
     "image-fallback": "图片兜底",
   }[mode] || mode || "区分平台";
+}
+
+function installContractBadgeClass(contract = {}) {
+  const blockers = contract.native_handoff_blocking_reasons || [];
+  // Platform mismatch must stay visible because MathType native objects are not portable.
+  if (blockers.includes("platform_mismatch") || contract.status === "平台不符") return "warn";
+  if (blockers.length || contract.status === "需同平台") return "warn";
+  if (contract.native_handoff_allowed || contract.status === "同平台可交接" || contract.status === "跨平台兜底") return "good";
+  return "blue";
 }
 
 function syncSelectAll(files) {

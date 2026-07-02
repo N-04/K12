@@ -25,6 +25,7 @@ class ReportBuilder:
     """Build and rewrite report artifacts from normalized task analysis."""
 
     def __init__(self, store: Any) -> None:
+        """Keep the runtime store used for paths, settings, and report writes."""
         self.store = store
 
     def build(self, task: dict[str, Any], files: list[dict[str, Any]], analysis: dict[str, Any]) -> dict[str, Any]:
@@ -136,6 +137,7 @@ class ReportBuilder:
 
     @staticmethod
     def _report_type(task_type: str) -> str:
+        """Map a task type to the user-facing report title."""
         mapping = {
             "formula_precheck": "公式预检报告",
             "omml_to_mathtype": "OMML 转换报告",
@@ -148,6 +150,7 @@ class ReportBuilder:
 
     @staticmethod
     def _normalize_formula_positions(payload: dict[str, Any]) -> None:
+        """Ensure every formula has a reportable position or explicit fallback."""
         file_names = {file.get("id"): file.get("file_name", "") for file in payload.get("files", [])}
         for index, item in enumerate(payload.get("analysis", {}).get("formulas", []), start=1):
             raw_position = str(item.get("position") or "").strip()
@@ -164,6 +167,7 @@ class ReportBuilder:
 
     @staticmethod
     def _summary(payload: dict[str, Any]) -> list[str]:
+        """Build the top-level report summary lines from counted payload fields."""
         return [
             f"成功文件 {payload['success_count']} 个，失败文件 {payload['fail_count']} 个。",
             f"公式 {payload['formula_count']} 个，OMML {payload['omml_count']} 个，已格式化 {payload['formatted_formula_count']} 个。",
@@ -179,6 +183,7 @@ class ReportBuilder:
 
     @staticmethod
     def _failure_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Collect file, conversion, Mathpix, OMML, macro, and preflight failures."""
         files = payload.get("files", [])
         file_names = {file.get("id"): file.get("file_name", "") for file in files}
         skipped_file_ids = {
@@ -320,6 +325,7 @@ class ReportBuilder:
         return rows
 
     def _quality_summary(self, files: list[dict[str, Any]], analysis: dict[str, Any], payload: dict[str, Any]) -> list[dict[str, str]]:
+        """Summarize PRD quality signals for the report overview section."""
         formulas = analysis.get("formulas", [])
         macros = analysis.get("macros", [])
         small_images = analysis.get("smallImages", [])
@@ -368,6 +374,7 @@ class ReportBuilder:
 
     @staticmethod
     def _quality_summary_row(row_id: str, label: str, metric: str, status: str, detail: str, recommendation: str) -> dict[str, str]:
+        """Create one normalized quality-summary row."""
         return {
             "id": row_id,
             "label": label,
@@ -378,6 +385,7 @@ class ReportBuilder:
         }
 
     def _possible_loss_notes(self, payload: dict[str, Any], analysis: dict[str, Any]) -> list[str]:
+        """Extract object-preservation risks from quality checks and artifacts."""
         notes: list[str] = []
         for item in payload.get("qualityChecks", []):
             if item.get("id") in {"content_preservation", "preview_consistency", "conversion_output"} and item.get("status") != "通过":
@@ -393,6 +401,7 @@ class ReportBuilder:
 
     @staticmethod
     def _failure_row(category: str, file_id: object, file_name: object, status: object, message: object, recommendation: object, source_id: object = "") -> dict[str, Any]:
+        """Create one normalized failure-list row for CSV and API exports."""
         return {
             "category": category,
             "file_id": file_id,
@@ -405,6 +414,7 @@ class ReportBuilder:
 
     @staticmethod
     def _failure_csv(rows: list[dict[str, Any]]) -> str:
+        """Render failure rows as a UTF-8 CSV string."""
         buffer = StringIO()
         writer = csv.DictWriter(buffer, fieldnames=["category", "file_id", "file_name", "status", "message", "recommendation", "source_id"])
         writer.writeheader()
@@ -413,6 +423,7 @@ class ReportBuilder:
         return buffer.getvalue()
 
     def _quality_checks(self, task: dict[str, Any], files: list[dict[str, Any]], analysis: dict[str, Any], payload: dict[str, Any]) -> list[dict[str, Any]]:
+        """Build detailed checks for validation, preservation, Mathpix, and handoff."""
         formulas = analysis.get("formulas", [])
         macros = analysis.get("macros", [])
         small_images = analysis.get("smallImages", [])
@@ -423,6 +434,7 @@ class ReportBuilder:
         artifacts = analysis.get("artifacts", [])
         batch_results = analysis.get("batchResults", [])
         preflight_checks = analysis.get("preflightChecks", [])
+        workflow_plan = analysis.get("workflowPlan") if isinstance(analysis.get("workflowPlan"), dict) else {}
         settings = self.store.get_settings()
         try:
             formula_threshold = max(1, int(settings.get("formulaConfidenceThreshold", 80) or 80))
@@ -466,6 +478,14 @@ class ReportBuilder:
         accounted_artifacts = successful_artifacts + len(skipped_artifacts)
         checks = [
             *preflight_checks,
+            ReportBuilder._quality_item(
+                "workflow_order",
+                "流程顺序",
+                "需确认" if workflow_plan.get("invalid_items") or workflow_plan.get("duplicate_items") else "通过",
+                ReportBuilder._workflow_plan_metric(workflow_plan),
+                ReportBuilder._workflow_plan_message(workflow_plan),
+                "检查处理配置中的流程顺序，移除未知或重复任务" if workflow_plan.get("invalid_items") or workflow_plan.get("duplicate_items") else "按当前拖拽顺序继续",
+            ),
             ReportBuilder._quality_item(
                 "file_validation",
                 "文件校验",
@@ -577,7 +597,35 @@ class ReportBuilder:
         ]
         return checks
 
+    @staticmethod
+    def _workflow_plan_metric(plan: dict[str, Any]) -> str:
+        """Format the normalized workflow order for quality-check metrics."""
+        labels = [str(label) for label in plan.get("labels") or []]
+        index = ReportBuilder._safe_int(plan.get("current_index"))
+        total = len(labels)
+        order_label = " → ".join(labels[:6]) if labels else "未记录"
+        suffix = "…" if len(labels) > 6 else ""
+        return f"当前 {index or '-'} / {total} · {order_label}{suffix}"
+
+    @staticmethod
+    def _workflow_plan_message(plan: dict[str, Any]) -> str:
+        """Explain whether workflow order was accepted, filtered, or missing."""
+        invalid = [str(item) for item in plan.get("invalid_items") or []]
+        duplicates = [str(item) for item in plan.get("duplicate_items") or []]
+        if invalid or duplicates:
+            parts = []
+            if invalid:
+                parts.append("已过滤未知任务：" + "、".join(invalid[:4]))
+            if duplicates:
+                parts.append("已去除重复任务：" + "、".join(duplicates[:4]))
+            return "；".join(parts)
+        labels = [str(label) for label in plan.get("labels") or []]
+        if labels:
+            return "流程顺序已随任务参数写入报告：" + " → ".join(labels[:6])
+        return "当前任务未记录流程顺序"
+
     def _preview_consistency_quality(self, files: list[dict[str, Any]], artifacts: list[dict[str, Any]]) -> dict[str, str]:
+        """Compare source and output previews to detect broad conversion drift."""
         source_files = {file.get("id"): file for file in files}
         comparable: list[dict[str, Any]] = []
         for artifact in artifacts:
@@ -611,6 +659,7 @@ class ReportBuilder:
 
     @staticmethod
     def _artifact_preview_file(artifact: dict[str, Any]) -> dict[str, Any] | None:
+        """Convert a successful artifact into a preview-compatible file payload."""
         output_type = str(artifact.get("output_type") or "").lower()
         file_type = {"docx": "Word", "docm": "Word", "pptx": "PPT", "xlsx": "Excel", "pdf": "PDF"}.get(output_type)
         path = Path(str(artifact.get("path") or ""))
@@ -634,6 +683,7 @@ class ReportBuilder:
 
     @staticmethod
     def _preview_diff(source_preview: dict[str, Any], output_preview: dict[str, Any]) -> dict[str, Any]:
+        """Compute page and object deltas between two preview payloads."""
         source_pages = len(source_preview.get("pages") or [])
         output_pages = len(output_preview.get("pages") or [])
         source_objects = {item.get("label") or item.get("type"): ReportBuilder._safe_int(item.get("count")) for item in source_preview.get("objects", [])}
@@ -660,6 +710,7 @@ class ReportBuilder:
 
     @staticmethod
     def _preview_consistency_note(artifact: dict[str, Any], diff: dict[str, Any]) -> str:
+        """Describe one preview comparison in a compact user-facing sentence."""
         losses = [f"{change['label']} {change['source']}→{change['output']}" for change in diff.get("object_changes", []) if change.get("delta", 0) < 0]
         loss_text = "，对象减少 " + "、".join(losses[:3]) if losses else ""
         return (
@@ -670,6 +721,7 @@ class ReportBuilder:
 
     @staticmethod
     def _source_object_counts(files: list[dict[str, Any]]) -> dict[str, int]:
+        """Count source images, tables, formulas, and structures across files."""
         counts = {"images": 0, "tables": 0, "formulas": 0, "structures": 0}
         for file in files:
             summary = file.get("content_summary") or {}
@@ -695,6 +747,7 @@ class ReportBuilder:
 
     @staticmethod
     def _content_preservation_risks(task: dict[str, Any], settings: dict[str, Any], counts: dict[str, int]) -> list[str]:
+        """Return conversion settings that may drop source document objects."""
         task_type = str(task.get("task_type") or "")
         conversion_tasks = {"word_to_ppt", "ppt_to_word", "pdf_to_word", "excel_to_pdf", "excel_to_word", "excel_to_ppt"}
         if task_type not in conversion_tasks:
@@ -717,6 +770,7 @@ class ReportBuilder:
 
     @staticmethod
     def _safe_int(value: Any) -> int:
+        """Convert loose count values to a non-negative integer."""
         try:
             return max(0, int(value or 0))
         except (TypeError, ValueError):
@@ -724,6 +778,7 @@ class ReportBuilder:
 
     @staticmethod
     def _quality_item(check_id: str, label: str, status: str, metric: str, message: str, recommendation: str) -> dict[str, str]:
+        """Create one detailed quality-check item with derived severity."""
         severity = {"通过": "info", "需确认": "warning", "失败": "error"}.get(status, "info")
         return {
             "id": check_id,
@@ -737,6 +792,7 @@ class ReportBuilder:
 
     @staticmethod
     def _html(payload: dict[str, Any]) -> str:
+        """Render the report payload as a self-contained HTML document."""
         summary = "".join(f"<li>{html.escape(line)}</li>" for line in payload["summary"])
         file_names = {file.get("id"): file.get("file_name", "") for file in payload.get("files", [])}
         file_rows = "".join(
@@ -975,6 +1031,7 @@ class ReportBuilder:
 
     @staticmethod
     def _text(payload: dict[str, Any]) -> str:
+        """Render the report payload as a plain-text audit summary."""
         lines = [payload["report_type"], f"报告 ID：{payload['id']}", ""]
         lines.extend(payload.get("summary", []))
         quality_summary = payload.get("qualitySummary", [])
@@ -1071,6 +1128,7 @@ class ReportBuilder:
 
     @staticmethod
     def _pdf_lines(payload: dict[str, Any]) -> list[str]:
+        """Return compact lines used by the lightweight PDF renderer."""
         lines = [payload["report_type"], f"Report ID: {payload['id']}", ""]
         lines.extend(payload.get("summary", []))
         lines.append("")
@@ -1132,6 +1190,7 @@ class ReportBuilder:
 
     @staticmethod
     def _write_xlsx(payload: dict[str, Any], path: Any) -> None:
+        """Write the report workbook using a minimal XLSX package."""
         rows = [
             ["报告类型", payload.get("report_type", "")],
             ["报告 ID", payload.get("id", "")],
@@ -1279,6 +1338,7 @@ class ReportBuilder:
 
     @staticmethod
     def _conversion_settings_label(settings: dict[str, Any]) -> str:
+        """Format conversion settings for artifact tables."""
         if not settings:
             return "默认"
         return "；".join(
@@ -1314,6 +1374,7 @@ class ReportBuilder:
 
     @staticmethod
     def _artifact_preservation_label(item: dict[str, Any]) -> str:
+        """Describe image, table, formula, OMML, and MathType preservation."""
         plan = item.get("object_preservation") or {}
         if not plan:
             return "未记录"
@@ -1331,6 +1392,7 @@ class ReportBuilder:
 
     @staticmethod
     def _mathpix_ocr_label(item: dict[str, Any]) -> str:
+        """Format Mathpix text, formula, and table OCR switches."""
         plan = item.get("retention_plan") or {}
         ocr = item.get("ocr_settings") or {}
         return "；".join(
@@ -1343,6 +1405,7 @@ class ReportBuilder:
 
     @staticmethod
     def _mathpix_hint_label(item: dict[str, Any]) -> str:
+        """Format PDF type and detected Mathpix source hints."""
         plan = item.get("retention_plan") or {}
         return "；".join(
             [
@@ -1355,6 +1418,7 @@ class ReportBuilder:
 
     @staticmethod
     def _mathpix_retention_label(item: dict[str, Any]) -> str:
+        """Format Mathpix image, table, and formula retention statuses."""
         plan = item.get("retention_plan") or {}
         if not plan:
             return "未记录"
@@ -1368,6 +1432,7 @@ class ReportBuilder:
 
     @staticmethod
     def _mathpix_note_label(item: dict[str, Any]) -> str:
+        """Join Mathpix retention notes into one table cell."""
         plan = item.get("retention_plan") or {}
         notes = plan.get("notes") or []
         if isinstance(notes, list):
@@ -1376,12 +1441,14 @@ class ReportBuilder:
 
     @staticmethod
     def _plan_bool(plan: dict[str, Any], fallback: dict[str, Any], key: str) -> bool:
+        """Read a boolean switch from a plan with OCR settings as fallback."""
         if key in plan:
             return bool(plan.get(key))
         return bool(fallback.get(key))
 
     @staticmethod
     def _formula_style_label(item: dict[str, Any]) -> str:
+        """Format formula typography and spacing settings for report rows."""
         return "；".join(
             [
                 f"范围 {item.get('format_scope', '-')}",
@@ -1403,6 +1470,7 @@ class ReportBuilder:
 
     @staticmethod
     def _formula_format_comparison_label(item: dict[str, Any]) -> str:
+        """Describe the before-and-after formula format comparison."""
         comparison = item.get("format_comparison") or {}
         summary = comparison.get("summary")
         if summary:
@@ -1415,6 +1483,7 @@ class ReportBuilder:
 
     @staticmethod
     def _formula_format_policy_label(item: dict[str, Any]) -> str:
+        """Describe formula-formatting fallback and retry policy."""
         policy = item.get("format_failure_policy") or {}
         if not policy:
             return "未记录"
@@ -1432,6 +1501,7 @@ class ReportBuilder:
 
     @staticmethod
     def _macro_failure_policy_label(item: dict[str, Any]) -> str:
+        """Describe the macro failure action used by the local-client handoff."""
         policy = item.get("failure_policy") or {}
         description = policy.get("description")
         if description:
@@ -1441,6 +1511,7 @@ class ReportBuilder:
 
     @staticmethod
     def _xlsx_sheet(rows: list[list[Any]]) -> str:
+        """Build the XML for the single report worksheet."""
         row_xml = []
         for row_index, row in enumerate(rows, start=1):
             cells = []
@@ -1453,6 +1524,7 @@ class ReportBuilder:
 
     @staticmethod
     def _column_name(index: int) -> str:
+        """Convert a 1-based column index to an Excel column name."""
         name = ""
         while index:
             index, remainder = divmod(index - 1, 26)
@@ -1461,26 +1533,31 @@ class ReportBuilder:
 
     @staticmethod
     def _xlsx_content_types() -> str:
+        """Return the XLSX content-types part."""
         return """<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"""
 
     @staticmethod
     def _xlsx_package_rels() -> str:
+        """Return the package relationship part for the workbook."""
         return """<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"""
 
     @staticmethod
     def _xlsx_workbook() -> str:
+        """Return the workbook XML for the single-sheet report."""
         return """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="K12 Report" sheetId="1" r:id="rId1"/></sheets></workbook>"""
 
     @staticmethod
     def _xlsx_workbook_rels() -> str:
+        """Return the workbook relationship part for the worksheet."""
         return """<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"""
 
     @staticmethod
     def _small_image_label(item: dict[str, Any]) -> str:
+        """Classify a small image as formula, QR code, stamp, signature, or icon."""
         if item.get("is_formula_like"):
             return "公式"
         if item.get("is_qrcode_like"):
@@ -1493,6 +1570,7 @@ class ReportBuilder:
 
     @staticmethod
     def _small_image_flags_label(item: dict[str, Any]) -> str:
+        """Format small-image flags such as watermark, duplicate, and transparency."""
         flags = []
         if item.get("is_header_footer"):
             flags.append("页眉页脚")

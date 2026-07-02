@@ -24,13 +24,13 @@ MATHPIX_ERROR_DETAIL_LIMIT = 600
 class MathpixConfigError(RuntimeError):
     """Raised when authorized Mathpix credential environment is incomplete."""
 
-    pass
+    code = "mathpix_config_error"
 
 
 class MathpixApiError(RuntimeError):
     """Raised when the Mathpix HTTP workflow returns an unsafe or failed result."""
 
-    pass
+    code = "mathpix_api_error"
 
 
 class MathpixClient:

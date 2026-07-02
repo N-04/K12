@@ -326,6 +326,7 @@ def build_pptx(slides: list[dict[str, Any]], target: Path) -> None:
 
 
 def _slides_from_blocks(blocks: list[dict[str, Any]], max_chars: int) -> list[dict[str, Any]]:
+    """Group DOCX blocks into lightweight slides for the baseline PPTX artifact."""
     slides: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     for block in blocks:
@@ -347,6 +348,7 @@ def _slides_from_blocks(blocks: list[dict[str, Any]], max_chars: int) -> list[di
 
 
 def _docx_object_preservation_lines(plan: dict[str, Any]) -> list[str]:
+    """Format DOCX object-preservation evidence without performing native writeback."""
     source = plan.get("source") or {}
     statuses = plan.get("statuses") or {}
     object_total = sum(int(source.get(key, 0) or 0) for key in ("images", "tables", "formulas"))
@@ -365,11 +367,13 @@ def _docx_object_preservation_lines(plan: dict[str, Any]) -> list[str]:
 
 
 def _extract_text(xml: str, tag: str) -> str:
+    """Extract and clean concatenated text nodes for one XML tag."""
     pieces = re.findall(fr"<{tag}[^>]*>([\s\S]*?)</{tag}>", xml)
     return _clean_text("".join(pieces))
 
 
 def _xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
+    """Read XLSX shared strings for lightweight worksheet previews."""
     try:
         xml = archive.read("xl/sharedStrings.xml").decode("utf-8", errors="ignore")
     except KeyError:
@@ -382,6 +386,7 @@ def _xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
 
 
 def _xlsx_sheet_names(archive: zipfile.ZipFile) -> dict[int, str]:
+    """Read workbook sheet names keyed by worksheet order."""
     try:
         xml = archive.read("xl/workbook.xml").decode("utf-8", errors="ignore")
     except KeyError:
@@ -393,6 +398,7 @@ def _xlsx_sheet_names(archive: zipfile.ZipFile) -> dict[int, str]:
 
 
 def _xlsx_cells(xml: str, shared_strings: list[str]) -> list[dict[str, str]]:
+    """Extract visible cell values and formulas from one worksheet XML part."""
     cells: list[dict[str, str]] = []
     for cell in re.findall(r"<c\b[\s\S]*?</c>", xml):
         ref_match = re.search(r'r="([^"]+)"', cell)
@@ -417,6 +423,7 @@ def _xlsx_cells(xml: str, shared_strings: list[str]) -> list[dict[str, str]]:
 
 
 def _pptx_related_parts(archive: zipfile.ZipFile, part_path: str) -> list[str]:
+    """Resolve relationships referenced by a PPTX slide or notes part."""
     rels_path = f"{posixpath.dirname(part_path)}/_rels/{posixpath.basename(part_path)}.rels"
     try:
         rels_xml = archive.read(rels_path).decode("utf-8", errors="ignore")
@@ -426,6 +433,7 @@ def _pptx_related_parts(archive: zipfile.ZipFile, part_path: str) -> list[str]:
 
 
 def _pptx_notes(archive: zipfile.ZipFile, related_parts: list[str]) -> list[str]:
+    """Extract speaker notes from related PPTX notes slides."""
     notes: list[str] = []
     for part in related_parts:
         if "/notesSlides/" not in f"/{part}":
@@ -439,11 +447,13 @@ def _pptx_notes(archive: zipfile.ZipFile, related_parts: list[str]) -> list[str]
 
 
 def _pptx_texts(xml: str) -> list[str]:
+    """Extract visible DrawingML text runs from PPTX XML."""
     texts = re.findall(r"<a:t\b[^>]*>([\s\S]*?)</a:t>", xml)
     return [_clean_text(item) for item in texts if _clean_text(item)]
 
 
 def _docx_slide_outline(slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Convert extracted slide summaries into DOCX outline paragraphs."""
     paragraphs: list[dict[str, Any]] = []
     for slide in slides:
         paragraphs.append({"text": slide["title"], "style": "Heading1"})
@@ -458,6 +468,7 @@ def _pptx_slide_summary(
     retain_images: bool = True,
     retain_formulas: bool = True,
 ) -> str:
+    """Summarize PPTX objects for handout output without claiming real rendering."""
     parts = [
         ("文本框", slide.get("text_box_count", 0)),
         ("图片", slide.get("image_count", 0) if retain_images else 0),
@@ -471,6 +482,7 @@ def _pptx_slide_summary(
 
 
 def _pptx_formula_count(xml: str) -> int:
+    """Count formula-like PPTX markers, MathType references, and TeX snippets."""
     math_objects = len(re.findall(r"<(?:\w+:)?oMath(?:Para)?\b", xml))
     mathtype_refs = len(re.findall(r"MathType|Equation Native", xml, flags=re.IGNORECASE))
     latex_refs = len(re.findall(r"\$[^$]{1,120}\$|\\(?:frac|sqrt|sum|int)\b", xml))
@@ -478,6 +490,7 @@ def _pptx_formula_count(xml: str) -> int:
 
 
 def _xlsx_sheet_objects(archive: zipfile.ZipFile, sheet_path: str, sheet_xml: str) -> dict[str, int]:
+    """Count worksheet drawings, charts, images, comments, and table parts."""
     rels_path = f"{posixpath.dirname(sheet_path)}/_rels/{posixpath.basename(sheet_path)}.rels"
     try:
         rels_xml = archive.read(rels_path).decode("utf-8", errors="ignore")
@@ -525,20 +538,24 @@ def _xlsx_sheet_objects(archive: zipfile.ZipFile, sheet_path: str, sheet_xml: st
 
 
 def _resolve_xlsx_target(source_path: str, target: str) -> str:
+    """Resolve an OOXML relationship target relative to its source part."""
     if target.startswith("/"):
         return target.lstrip("/")
     return posixpath.normpath(posixpath.join(posixpath.dirname(source_path), target))
 
 
 def _strip_xml(xml: str) -> str:
+    """Remove XML tags and normalize the remaining text."""
     return _clean_text(re.sub(r"<[^>]+>", "", xml))
 
 
 def _clean_text(text: str) -> str:
+    """Collapse whitespace and unescape XML or HTML text entities."""
     return html.unescape(re.sub(r"\s+", " ", text)).strip()
 
 
 def _heading_level(paragraph: str, index: int) -> int:
+    """Infer a simple heading level from DOCX style markers."""
     style_match = re.search(r'w:val="([^"]+)"', paragraph)
     style = style_match.group(1).lower() if style_match else ""
     if "heading1" in style or style in {"title", "1"} or index == 1:
@@ -549,16 +566,19 @@ def _heading_level(paragraph: str, index: int) -> int:
 
 
 def _slide_number(path: str) -> int:
+    """Return the numeric order of a PPTX slide path."""
     match = re.search(r"slide(\d+)\.xml$", path)
     return int(match.group(1)) if match else 0
 
 
 def _worksheet_number(path: str) -> int:
+    """Return the numeric order of an XLSX worksheet path."""
     match = re.search(r"sheet(\d+)\.xml$", path)
     return int(match.group(1)) if match else 0
 
 
 def _pdf_pages(lines: list[str], page_size: int) -> list[list[str]]:
+    """Paginate plain text lines for the lightweight PDF writer."""
     pages: list[list[str]] = []
     current: list[str] = []
     for line in lines:
@@ -573,6 +593,7 @@ def _pdf_pages(lines: list[str], page_size: int) -> list[list[str]]:
 
 
 def _pdf_line_chunks(line: str, width: int = 92) -> list[str]:
+    """Wrap one text line into ASCII chunks that fit the PDF page."""
     clean = _pdf_ascii(line)
     if not clean:
         return [""]
@@ -580,15 +601,18 @@ def _pdf_line_chunks(line: str, width: int = 92) -> list[str]:
 
 
 def _pdf_ascii(value: str) -> str:
+    """Convert text to the ASCII subset supported by the simple PDF writer."""
     text = html.unescape(str(value))
     return "".join(char if 32 <= ord(char) <= 126 else "?" for char in text)
 
 
 def _pdf_escape(value: str) -> str:
+    """Escape text for a PDF literal string."""
     return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
 def _pdf_stream(lines: list[str]) -> bytes:
+    """Build one PDF content stream from already wrapped ASCII lines."""
     commands = ["BT", "/F1 11 Tf", "50 792 Td", "14 TL"]
     for index, line in enumerate(lines):
         if index:
@@ -599,6 +623,7 @@ def _pdf_stream(lines: list[str]) -> bytes:
 
 
 def _write_pdf(objects: list[bytes], target: Path) -> None:
+    """Write a minimal PDF file with an xref table."""
     offsets: list[int] = []
     content = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
     for index, obj in enumerate(objects, start=1):
@@ -616,21 +641,25 @@ def _write_pdf(objects: list[bytes], target: Path) -> None:
 
 
 def _docx_paragraph(text: str, style: str) -> str:
+    """Render one minimal WordprocessingML paragraph."""
     style_xml = '<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>' if style == "Heading1" else ""
     return f"<w:p>{style_xml}<w:r><w:t>{html.escape(text)}</w:t></w:r></w:p>"
 
 
 def _docx_content_types() -> str:
+    """Return the DOCX content-types part for a single document part."""
     return """<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"""
 
 
 def _package_rels(target: str) -> str:
+    """Return package relationships XML pointing at the main OOXML part."""
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="{target}"/></Relationships>"""
 
 
 def _pptx_content_types(slide_count: int) -> str:
+    """Return PPTX content-types XML for the requested slide count."""
     overrides = "".join(
         f'<Override PartName="/ppt/slides/slide{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
         for index in range(1, slide_count + 1)
@@ -640,12 +669,14 @@ def _pptx_content_types(slide_count: int) -> str:
 
 
 def _presentation_xml(slide_count: int) -> str:
+    """Return the minimal PPTX presentation XML with slide ids."""
     slide_ids = "".join(f'<p:sldId id="{255 + index}" r:id="rId{index}"/>' for index in range(1, slide_count + 1))
     return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst>{slide_ids}</p:sldIdLst><p:sldSz cx="9144000" cy="6858000" type="screen4x3"/></p:presentation>"""
 
 
 def _presentation_rels(slide_count: int) -> str:
+    """Return presentation relationships for all generated slides."""
     rels = "".join(
         f'<Relationship Id="rId{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{index}.xml"/>'
         for index in range(1, slide_count + 1)
@@ -655,6 +686,7 @@ def _presentation_rels(slide_count: int) -> str:
 
 
 def _slide_xml(title: str, body: list[str]) -> str:
+    """Render one minimal PPTX slide with title and body text."""
     body_text = "\n".join(body) if body else ""
     return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/></p:nvSpPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>{html.escape(title)}</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Content"/></p:nvSpPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>{html.escape(body_text)}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"""

@@ -66,6 +66,7 @@ def build_file_preview(file: dict[str, Any]) -> dict[str, Any]:
 
 
 def _word_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> None:
+    """Populate preview pages and object counts for OOXML Word files."""
     if path.suffix.lower() not in {".docx", ".docm", ".dotx", ".dotm"}:
         preview["status"] = "local_required"
         preview["mode"] = "local-client"
@@ -96,6 +97,7 @@ def _word_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> 
 
 
 def _ppt_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> None:
+    """Populate preview pages and object counts for OOXML presentation files."""
     if path.suffix.lower() not in {".pptx", ".pptm"}:
         preview["status"] = "local_required"
         preview["mode"] = "local-client"
@@ -125,6 +127,7 @@ def _ppt_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> N
 
 
 def _excel_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> None:
+    """Populate preview pages and object counts for OOXML workbook files."""
     if path.suffix.lower() not in {".xlsx", ".xlsm"}:
         preview["status"] = "local_required"
         preview["mode"] = "local-client"
@@ -151,6 +154,7 @@ def _excel_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) ->
 
 
 def _pdf_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> None:
+    """Populate a metadata-first PDF preview with OCR and Mathpix hints."""
     data = path.read_bytes()[:3_000_000]
     text = data.decode("latin-1", errors="ignore")
     snippets = _pdf_text_snippets(text)
@@ -180,6 +184,7 @@ def _pdf_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> N
 
 
 def _image_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> None:
+    """Populate image preview metadata without decoding full pixel content."""
     dimensions = _image_dimensions(path.read_bytes()[:2_000_000])
     text = "图片尺寸未识别"
     if dimensions:
@@ -191,6 +196,7 @@ def _image_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) ->
 
 
 def _zip_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> None:
+    """Populate archive preview rows from safe ZIP entry metadata."""
     with zipfile.ZipFile(path) as archive:
         entries = [info for info in archive.infolist() if not info.is_dir()]
     preview["pages"] = [
@@ -207,6 +213,7 @@ def _zip_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> N
 
 
 def _base_objects(file: dict[str, Any]) -> list[dict[str, Any]]:
+    """Build preview object badges from file-level capability flags."""
     objects: list[dict[str, Any]] = []
     flags = [
         ("公式", file.get("has_formula"), "需预检"),
@@ -224,6 +231,7 @@ def _base_objects(file: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _add_count_object(preview: dict[str, Any], label: str, count: Any, status: str) -> None:
+    """Append a counted preview object when the amount is positive."""
     amount = int(count or 0)
     if amount <= 0:
         return
@@ -231,6 +239,7 @@ def _add_count_object(preview: dict[str, Any], label: str, count: Any, status: s
 
 
 def _metadata_pages(file: dict[str, Any]) -> list[dict[str, Any]]:
+    """Create fallback preview pages from stored metadata only."""
     summary = file.get("content_summary") or {}
     details = [f"{key}: {value}" for key, value in list(summary.items())[:12]]
     if not details:
@@ -239,6 +248,7 @@ def _metadata_pages(file: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _attach_preview_markers(preview: dict[str, Any], file: dict[str, Any]) -> dict[str, Any]:
+    """Attach formula, OMML, macro, image, and confidence markers to preview pages."""
     markers = _preview_markers(file)
     if not markers:
         return preview
@@ -260,6 +270,7 @@ def _attach_preview_markers(preview: dict[str, Any], file: dict[str, Any]) -> di
 
 
 def _preview_markers(file: dict[str, Any]) -> list[dict[str, str]]:
+    """Return marker chips that explain PRD-sensitive preview findings."""
     markers: list[dict[str, str]] = []
     marker_specs = [
         ("公式", file.get("has_formula"), "warn", "公式高亮", "检测到公式对象，建议进入公式预检"),
@@ -276,6 +287,7 @@ def _preview_markers(file: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _has_low_confidence_hint(file: dict[str, Any]) -> bool:
+    """Return whether preview should expose a low-confidence warning marker."""
     summary = file.get("content_summary") or {}
     if file.get("validation_errors"):
         return True
@@ -283,6 +295,7 @@ def _has_low_confidence_hint(file: dict[str, Any]) -> bool:
 
 
 def _sheet_preview_text(sheet: dict[str, Any]) -> str:
+    """Format the first extracted worksheet cells for compact preview text."""
     cells = sheet.get("cells", [])
     if not cells:
         return "未提取到可显示单元格"
@@ -290,6 +303,7 @@ def _sheet_preview_text(sheet: dict[str, Any]) -> str:
 
 
 def _pdf_text_snippets(text: str) -> list[str]:
+    """Extract small PDF text-showing snippets from raw page content."""
     chunks = []
     for pattern in [r"\(([^()]{3,160})\)\s*Tj", r"\(([^()]{3,160})\)\s*'"]:
         for value in re.findall(pattern, text):
@@ -300,10 +314,12 @@ def _pdf_text_snippets(text: str) -> list[str]:
 
 
 def _clean_preview_text(value: str) -> str:
+    """Normalize preview text extracted from XML, PDF, or archive metadata."""
     return html.unescape(re.sub(r"\s+", " ", value)).strip()
 
 
 def _image_dimensions(data: bytes) -> tuple[int, int, str] | None:
+    """Read basic PNG, GIF, BMP, or JPEG dimensions from header bytes."""
     if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
         return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"), "png"
     if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
@@ -316,6 +332,7 @@ def _image_dimensions(data: bytes) -> tuple[int, int, str] | None:
 
 
 def _jpeg_dimensions(data: bytes) -> tuple[int, int, str] | None:
+    """Read JPEG dimensions by scanning safe frame headers."""
     index = 2
     while index + 9 < len(data):
         if data[index] != 0xFF:

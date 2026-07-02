@@ -49,13 +49,13 @@
               <option value="">请选择</option>
               <option value="word_to_ppt">Word 转 PPT</option>
               <option value="ppt_to_word">PPT 转 Word</option>
-              <option value="pdf_to_word">PDF 转 Word</option>
+              <option value="pdf_to_word">PDF 转 Word / PDF 公式识别</option>
               <option value="excel_to_pdf">Excel 转 PDF</option>
               <option value="excel_to_word">Excel 转 Word</option>
               <option value="excel_to_ppt">Excel 转 PPT</option>
-              <option value="formula_precheck">Word 公式预检</option>
-              <option value="omml_to_mathtype">OMML 转 MathType</option>
-              <option value="mathtype_format">MathType 格式化</option>
+              <option value="formula_precheck">MathType 公式处理 / Word 公式预检</option>
+              <option value="omml_to_mathtype">Word 自带公式转 MathType</option>
+              <option value="mathtype_format">Word 公式格式化</option>
               <option value="macro_sequence">Word 宏顺序执行</option>
               <option value="small_image_scan">微小图片检索</option>
             </select></label>
@@ -69,6 +69,7 @@
             <button id="pauseActiveTaskButton" class="secondary-button" type="button">Ⅱ 暂停</button>
             <button id="stopActiveTaskButton" class="secondary-button" type="button">■ 停止</button>
             <button id="exportLatestReportButton" class="secondary-button" type="button">⇩ 导出报告</button>
+            <span id="toolbarSelectionCount" class="toolbar-selection-count">已选择 0 个文件</span>
             <button id="createBatchButton" class="visually-hidden" type="button">创建批量任务</button>
           </div>
           <div class="title-block visually-hidden">
@@ -196,14 +197,7 @@
                 <h3>快速任务</h3>
                 <div class="quick-task-row home-quick-grid">
                   <button class="secondary-button quick-task" data-task="word_to_ppt">Word 转 PPT</button>
-                  <button class="secondary-button quick-task" data-task="ppt_to_word">PPT 转 Word</button>
                   <button class="secondary-button quick-task" data-task="pdf_to_word">PDF 转 Word</button>
-                  <button class="secondary-button quick-task" data-task="formula_precheck">MathType 公式处理</button>
-                  <button class="secondary-button quick-task" data-task="omml_to_mathtype">Word 自带公式转 MathType</button>
-                  <button class="secondary-button quick-task" data-task="mathtype_format">Word 公式格式化</button>
-                  <button class="secondary-button quick-task" data-task="macro_sequence">Word 宏顺序执行</button>
-                  <button class="secondary-button quick-task" data-task="pdf_to_word">PDF 公式识别</button>
-                  <button class="secondary-button quick-task" data-task="small_image_scan">微小图片检索</button>
                   <button class="secondary-button quick-task" data-task="batch_process">批量处理</button>
                 </div>
               </div>
@@ -867,7 +861,7 @@
                 <h2>Mathpix PDF</h2>
               </div>
               <div class="settings-grid">
-                <label><span>PDF 转 Word 引擎</span><select id="pdfToWordEngine"><option>Mathpix</option></select></label>
+                <label><span>PDF 转 Word 引擎</span><select id="pdfToWordEngine" disabled title="固定使用 Mathpix"><option>Mathpix</option></select></label>
                 <label><span>授权外部上传</span><input id="allowExternalMathpixUpload" type="checkbox" /></label>
                 <label><span>等待识别完成</span><input id="waitForMathpix" type="checkbox" /></label>
                 <label><span>APP ID 环境变量</span><input id="mathpixAppIdEnv" type="text" /></label>
@@ -1013,6 +1007,7 @@
                 </div>
                 <button class="secondary-button" data-view-shortcut="tasks" type="button">查看报告</button>
               </div>
+              <div id="acceptanceRiskPanel" class="acceptance-risk-grid"></div>
               <div id="acceptanceMatrixPanel" class="acceptance-matrix-grid"></div>
             </section>
             <section class="panel wide-panel version-roadmap-panel">

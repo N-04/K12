@@ -222,6 +222,7 @@ class AppStore:
     """Manage local runtime directories and SQLite records for one workspace."""
 
     def __init__(self, data_dir: Path | str = ".k12-data") -> None:
+        """Create managed runtime folders and initialize the SQLite schema."""
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.reports_dir = self.data_dir / "reports"
@@ -251,6 +252,7 @@ class AppStore:
         return conn
 
     def _init_db(self) -> None:
+        """Create or migrate all local tables required by the PRD workflows."""
         with self._lock, self.connect() as conn:
             conn.executescript(
                 """
@@ -353,12 +355,14 @@ class AppStore:
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
+        """Add one SQLite column when older local stores are missing it."""
         columns = {row["name"] for row in conn.execute(f"pragma table_info({table})").fetchall()}
         if column not in columns:
             conn.execute(f"alter table {table} add column {column} {definition}")
 
     @staticmethod
     def _ensure_default_users(conn: sqlite3.Connection) -> None:
+        """Seed the local administrator when a fresh runtime store has no users."""
         count = conn.execute("select count(*) as count from users").fetchone()["count"]
         if count:
             return
@@ -381,6 +385,7 @@ class AppStore:
 
     @staticmethod
     def _ensure_default_authorizations(conn: sqlite3.Connection) -> None:
+        """Seed explicit authorization toggles for Mathpix, sync, macros, and paths."""
         now = utc_now()
         for key, value in DEFAULT_AUTHORIZATIONS.items():
             payload = {
@@ -398,6 +403,7 @@ class AppStore:
             )
 
     def _log_category_enabled(self, category: str) -> bool:
+        """Return whether a log category should be persisted under current settings."""
         setting_key = {
             "upload": "logUploadEvents",
             "conversion": "logConversionEvents",
@@ -523,6 +529,7 @@ class AppStore:
 
     @staticmethod
     def _task_with_duration(payload: dict[str, Any], now: str) -> dict[str, Any]:
+        """Attach elapsed-time fields without mutating the stored task payload."""
         enriched = dict(payload)
         start = AppStore._parse_timestamp(enriched.get("start_time"))
         end = AppStore._parse_timestamp(enriched.get("end_time")) or AppStore._parse_timestamp(now)
@@ -536,6 +543,7 @@ class AppStore:
 
     @staticmethod
     def _parse_timestamp(value: Any) -> datetime | None:
+        """Parse task timestamps while accepting missing or malformed values."""
         if not value:
             return None
         try:
@@ -548,6 +556,7 @@ class AppStore:
 
     @staticmethod
     def _duration_label(seconds: int) -> str:
+        """Format a non-negative duration for task tables and reports."""
         seconds = max(0, int(seconds or 0))
         hours, remainder = divmod(seconds, 3600)
         minutes, secs = divmod(remainder, 60)
@@ -1033,6 +1042,10 @@ class AppStore:
             "latex": str(payload.get("latex") or ""),
             "mathml": str(payload.get("mathml") or ""),
             "note": str(payload.get("note") or ""),
+            "retry_recognition": bool(payload.get("retry_recognition", payload.get("retryRecognition", False))),
+            "recognition_status": str(payload.get("recognition_status") or payload.get("recognitionStatus") or ""),
+            "recognition_request": dict(payload.get("recognition_request") or payload.get("recognitionRequest") or {}),
+            "next_step": str(payload.get("next_step") or payload.get("nextStep") or ""),
             "created_at": str(payload.get("created_at") or now),
             "updated_at": now,
         }
@@ -1181,6 +1194,7 @@ class AppStore:
         return cur.rowcount > 0
 
     def _cleanup_uploaded_payloads(self, payloads: list[dict[str, Any]]) -> None:
+        """Remove managed upload cache files without touching external source paths."""
         upload_root = self.uploads_dir.resolve()
         archive_dirs: set[Path] = set()
         for payload in payloads:
@@ -1199,6 +1213,7 @@ class AppStore:
                     try:
                         resolved.unlink()
                     except OSError:
+                        # Best-effort cleanup should not block record deletion.
                         pass
             if source_kind == "upload":
                 archive_dirs.add(self.uploads_dir / str(payload.get("id") or ""))
@@ -1215,7 +1230,8 @@ class AppStore:
                 shutil.rmtree(resolved_dir, ignore_errors=True)
 
     @staticmethod
-    def _parse_timestamp(value: str) -> datetime | None:
+    def _parse_cleanup_timestamp(value: str) -> datetime | None:
+        """Parse cleanup cutoff timestamps into UTC for retention comparisons."""
         try:
             parsed = datetime.fromisoformat(value)
         except ValueError:
@@ -1226,14 +1242,17 @@ class AppStore:
 
     @classmethod
     def _timestamp_at_or_before(cls, value: str, cutoff: datetime) -> bool:
-        parsed = cls._parse_timestamp(value)
+        """Return whether one cleanup timestamp is at or before a UTC cutoff."""
+        parsed = cls._parse_cleanup_timestamp(value)
         return bool(parsed and parsed <= cutoff)
 
     @staticmethod
     def _sql_placeholders(values: set[str] | list[int]) -> str:
+        """Build a placeholder list for already non-empty id collections."""
         return ",".join("?" for _ in values)
 
     def _cleanup_report_files(self, reports: list[dict[str, Any]]) -> int:
+        """Delete report artifacts that stay inside the managed reports directory."""
         report_root = self.reports_dir.resolve()
         deleted = 0
         for report in reports:
@@ -1251,10 +1270,12 @@ class AppStore:
                         resolved.unlink()
                         deleted += 1
                     except OSError:
+                        # Leave stubborn files for the next maintenance pass.
                         pass
         return deleted
 
     def _cleanup_report_image_files(self, report: dict[str, Any]) -> int:
+        """Delete cached report images that stay inside the managed image directory."""
         image_root = self.images_dir.resolve()
         deleted = 0
         for image in report.get("analysis", {}).get("smallImages", []):
@@ -1271,10 +1292,12 @@ class AppStore:
                     resolved.unlink()
                     deleted += 1
                 except OSError:
+                    # Report deletion should continue even if an image is locked.
                     pass
         return deleted
 
     def _cleanup_runtime_dirs(self, task_ids: set[str]) -> dict[str, int]:
+        """Remove task-scoped output, backup, and image directories under managed roots."""
         counts = {"output_dirs_deleted": 0, "backup_dirs_deleted": 0, "image_dirs_deleted": 0}
         output_roots = [self._configured_output_base_dir(), self.outputs_dir]
         backup_roots = [self.backups_dir]
@@ -1291,12 +1314,14 @@ class AppStore:
         return counts
 
     def _configured_output_base_dir(self) -> Path:
+        """Resolve the configured output directory relative to the managed data dir."""
         raw = str(self.get_settings().get("outputDirectory") or "outputs").strip() or "outputs"
         path = Path(raw).expanduser()
         return path if path.is_absolute() else self.data_dir / path
 
     @staticmethod
     def _remove_child_dir(root: Path, child_name: str) -> int:
+        """Remove one direct child directory only when it stays under the root."""
         try:
             resolved_root = root.resolve()
             target = (root / child_name).resolve()
@@ -1309,6 +1334,7 @@ class AppStore:
         return 0 if target.exists() else 1
 
     def _reset_password_sessions(self) -> None:
+        """Clear runtime-only document passwords when a store instance starts."""
         for payload in self.list_files():
             if not payload.get("password_session_active"):
                 continue

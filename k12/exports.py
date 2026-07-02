@@ -60,6 +60,9 @@ def build_formula_xlsx(report: dict[str, Any], annotations: list[dict[str, Any]]
             "confidence",
             "status",
             "annotation_note",
+            "retry_recognition",
+            "recognition_status",
+            "recognition_next_step",
         ],
     ]
     for formula in formulas:
@@ -82,6 +85,9 @@ def build_formula_xlsx(report: dict[str, Any], annotations: list[dict[str, Any]]
                 formula.get("confidence", ""),
                 annotation.get("status") or formula.get("status", ""),
                 annotation.get("note", ""),
+                annotation.get("retry_recognition", ""),
+                annotation.get("recognition_status", ""),
+                annotation.get("next_step", ""),
             ]
         )
     return _xlsx_bytes(rows, "Formula Results")
@@ -247,10 +253,12 @@ def build_macro_failure_csv(report: dict[str, Any], expose_paths: bool = False) 
 
 
 def _macro_failure_row_needed(macro: dict[str, Any]) -> bool:
+    """Return whether one macro should appear in the macro failure CSV."""
     return macro.get("execute_status") in {"失败", "未授权", "已禁用"}
 
 
 def _macro_failure_row(report: dict[str, Any], macro: dict[str, Any], file: dict[str, Any], expose_paths: bool) -> dict[str, Any]:
+    """Build one macro failure export row with optional local path redaction."""
     policy = macro.get("failure_policy") or {}
     return {
         "report_id": report.get("id", ""),
@@ -272,6 +280,7 @@ def _macro_failure_row(report: dict[str, Any], macro: dict[str, Any], file: dict
 
 
 def _macro_failure_recommendation(macro: dict[str, Any]) -> str:
+    """Return the next action for a failed, blocked, or disabled macro."""
     status = str(macro.get("execute_status") or "")
     if status == "未授权":
         return "检查宏来源授权、白名单和当前用户宏执行权限后重试"
@@ -287,6 +296,7 @@ def _macro_failure_recommendation(macro: dict[str, Any]) -> str:
 
 
 def _omml_failure_row_needed(dependency: dict[str, Any], annotation: dict[str, Any]) -> bool:
+    """Return whether one OMML dependency or annotation needs export attention."""
     return (
         dependency.get("found_status") == "未找到"
         or dependency.get("copy_status") == "失败"
@@ -301,6 +311,7 @@ def _omml_failure_row(
     annotation: dict[str, Any],
     expose_paths: bool,
 ) -> dict[str, Any]:
+    """Build one OMML dependency failure row with annotation context."""
     message = dependency.get("error_message") or annotation.get("note") or f"检索：{dependency.get('found_status', '')}，复制：{dependency.get('copy_status', '')}"
     recommendation = _omml_failure_recommendation(dependency, annotation)
     return {
@@ -325,6 +336,7 @@ def _omml_failure_row(
 
 
 def _omml_failure_recommendation(dependency: dict[str, Any], annotation: dict[str, Any]) -> str:
+    """Return the next action for OMML lookup, copy, or conversion failures."""
     if annotation.get("retry_conversion"):
         return "重新执行 OMML 转 MathType，并保留原 OMML 兜底"
     if annotation.get("manual_omml_path"):
@@ -337,6 +349,7 @@ def _omml_failure_recommendation(dependency: dict[str, Any], annotation: dict[st
 
 
 def _dict_csv(rows: list[dict[str, Any]], fieldnames: list[str]) -> str:
+    """Render dictionaries to CSV using an explicit field order."""
     lines = [",".join(fieldnames)]
     for row in rows:
         lines.append(",".join(_csv_cell(row.get(name, "")) for name in fieldnames))
@@ -344,6 +357,7 @@ def _dict_csv(rows: list[dict[str, Any]], fieldnames: list[str]) -> str:
 
 
 def _export_path(value: object, expose_paths: bool) -> str:
+    """Hide local paths unless the caller explicitly allows path exposure."""
     text = str(value or "")
     if not text or expose_paths:
         return text
@@ -352,6 +366,7 @@ def _export_path(value: object, expose_paths: bool) -> str:
 
 
 def _formula_json(report: dict[str, Any], formulas: list[dict[str, Any]], files_by_id: dict[str, str], annotations: dict[str, dict[str, Any]]) -> str:
+    """Render formula export metadata as path-free JSON."""
     items: list[dict[str, Any]] = []
     for formula in formulas:
         annotation = annotations.get(formula.get("id"), {})
@@ -374,13 +389,18 @@ def _formula_json(report: dict[str, Any], formulas: list[dict[str, Any]], files_
                 "mathml": annotation.get("mathml") or formula.get("mathml", ""),
                 "mathtype_preview": formula.get("mathtype_preview") or formula.get("mathtype_data", ""),
                 "annotation_note": annotation.get("note", ""),
+                "retry_recognition": annotation.get("retry_recognition", False),
+                "recognition_status": annotation.get("recognition_status", ""),
+                "recognition_next_step": annotation.get("next_step", ""),
+                "recognition_request": annotation.get("recognition_request", {}),
             }
         )
     return json.dumps({"report_id": report.get("id", ""), "formula_count": len(items), "formulas": items}, ensure_ascii=False, indent=2) + "\n"
 
 
 def _formula_manifest(formulas: list[dict[str, Any]], files_by_id: dict[str, str], annotations: dict[str, dict[str, Any]]) -> str:
-    rows = ["formula_id,file_name,page,position,position_status,position_issue,source_type,confidence,status,format_status,latex,mathml"]
+    """Render formula export metadata as a manifest CSV."""
+    rows = ["formula_id,file_name,page,position,position_status,position_issue,source_type,confidence,status,format_status,latex,mathml,retry_recognition,recognition_status,recognition_next_step"]
     for formula in formulas:
         annotation = annotations.get(formula.get("id"), {})
         rows.append(
@@ -399,6 +419,9 @@ def _formula_manifest(formulas: list[dict[str, Any]], files_by_id: dict[str, str
                     formula.get("format_status", ""),
                     annotation.get("latex") or formula.get("latex", ""),
                     annotation.get("mathml") or formula.get("mathml", ""),
+                    annotation.get("retry_recognition", ""),
+                    annotation.get("recognition_status", ""),
+                    annotation.get("next_step", ""),
                 ]
             )
         )
@@ -406,6 +429,7 @@ def _formula_manifest(formulas: list[dict[str, Any]], files_by_id: dict[str, str
 
 
 def _formula_tex_document(formulas: list[dict[str, Any]], files_by_id: dict[str, str], annotations: dict[str, dict[str, Any]]) -> str:
+    """Combine all formulas into one TeX document for report download."""
     lines = ["% K12 formula export", ""]
     for formula in formulas:
         lines.append(_formula_tex_item(formula, files_by_id, annotations).rstrip())
@@ -414,6 +438,7 @@ def _formula_tex_document(formulas: list[dict[str, Any]], files_by_id: dict[str,
 
 
 def _formula_tex_item(formula: dict[str, Any], files_by_id: dict[str, str], annotations: dict[str, dict[str, Any]]) -> str:
+    """Render one formula as a TeX display block with audit metadata."""
     annotation = annotations.get(formula.get("id"), {})
     source_file = files_by_id.get(formula.get("file_id"), formula.get("file_id", ""))
     status = annotation.get("status") or formula.get("status", "")
@@ -427,6 +452,7 @@ def _formula_tex_item(formula: dict[str, Any], files_by_id: dict[str, str], anno
 
 
 def _formula_mml_document(formulas: list[dict[str, Any]], files_by_id: dict[str, str], annotations: dict[str, dict[str, Any]]) -> str:
+    """Combine all formulas into one XML-style MathML export document."""
     rows = ["<?xml version=\"1.0\" encoding=\"UTF-8\"?>", "<formulas>"]
     for formula in formulas:
         annotation = annotations.get(formula.get("id"), {})
@@ -448,6 +474,7 @@ def _formula_mml_document(formulas: list[dict[str, Any]], files_by_id: dict[str,
 
 
 def _formula_mathml(formula: dict[str, Any], annotations: dict[str, dict[str, Any]]) -> str:
+    """Return stored MathML or a safe MathML text fallback from LaTeX."""
     annotation = annotations.get(formula.get("id"), {})
     mathml = annotation.get("mathml") or formula.get("mathml") or ""
     if mathml.strip():
@@ -457,12 +484,14 @@ def _formula_mathml(formula: dict[str, Any], annotations: dict[str, dict[str, An
 
 
 def _formula_file_stem(index: int, formula: dict[str, Any]) -> str:
+    """Create a stable safe filename stem for one exported formula."""
     raw = str(formula.get("id") or f"formula-{index}")
     safe = "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in raw)
     return f"{index:03d}-{safe[:80]}"
 
 
 def _small_image_kind(image: dict[str, Any]) -> str:
+    """Classify a small image for manifest and workbook exports."""
     if image.get("is_formula_like"):
         return "公式"
     if image.get("is_qrcode_like"):
@@ -475,6 +504,7 @@ def _small_image_kind(image: dict[str, Any]) -> str:
 
 
 def _xlsx_bytes(rows: list[list[Any]], sheet_name: str) -> bytes:
+    """Package rows into a minimal XLSX workbook."""
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("[Content_Types].xml", _xlsx_content_types())
@@ -486,6 +516,7 @@ def _xlsx_bytes(rows: list[list[Any]], sheet_name: str) -> bytes:
 
 
 def _xlsx_sheet(rows: list[list[Any]]) -> str:
+    """Build worksheet XML with inline string cells."""
     row_xml = []
     for row_index, row in enumerate(rows, start=1):
         cells = []
@@ -498,6 +529,7 @@ def _xlsx_sheet(rows: list[list[Any]]) -> str:
 
 
 def _column_name(index: int) -> str:
+    """Convert a 1-based column index to an Excel column name."""
     name = ""
     while index:
         index, remainder = divmod(index - 1, 26)
@@ -506,26 +538,31 @@ def _column_name(index: int) -> str:
 
 
 def _xlsx_content_types() -> str:
+    """Return the content-types XML for the generated XLSX package."""
     return """<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"""
 
 
 def _xlsx_package_rels() -> str:
+    """Return the package relationships XML for the workbook entry."""
     return """<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"""
 
 
 def _xlsx_workbook(sheet_name: str) -> str:
+    """Return workbook XML with a safe single-sheet name."""
     safe_name = html.escape(sheet_name[:31] or "Sheet1", quote=True)
     return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="{safe_name}" sheetId="1" r:id="rId1"/></sheets></workbook>"""
 
 
 def _xlsx_workbook_rels() -> str:
+    """Return workbook relationships XML for the single worksheet."""
     return """<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"""
 
 
 def _csv_cell(value: object) -> str:
+    """Quote one CSV cell for deterministic export output."""
     text = str(value).replace('"', '""')
     return f'"{text}"'

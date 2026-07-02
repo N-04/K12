@@ -5,7 +5,7 @@
 K12 首版采用本地单机架构：
 
 - `static/`：浏览器工作台，负责拖拽文件、任务创建、筛选、设置和报告查看。
-- 工作台处理流程支持拖动左侧线条图标或上下移动排序，创建任务时会把 `workflowOrder` 与展示标签写入任务 `options`，本地客户端和报告可复核用户当时的流程顺序。
+- 工作台处理流程通过拖动左侧线条图标排序，也支持焦点停在手柄时用方向键或 Home/End 调整位置；创建任务时会把规范化后的 `workflowOrder`、展示标签和 `k12.workflowPlan.v1` 写入任务 `options`、本地客户端载荷、就绪摘要和报告质量检查，便于网页端与桌面端复核同一份流程顺序。
 - `k12/server.py`：本地 HTTP API，默认监听 `127.0.0.1`，只暴露 JSON 与静态资源。
 - `localSecurityToken` 为空时 API 不拦截；设置后除健康检查外的 API 都需要 `X-K12-Token`、Bearer token 或下载查询参数。
 - `k12/store.py`：SQLite 存储，保存文件、任务、报告、日志、设置。
@@ -19,7 +19,7 @@ K12 首版采用本地单机架构：
 - `k12/mathpix.py`：Mathpix PDF OCR 客户端封装，用于 PDF 转 Word 的提交、状态轮询、DOCX 下载和 `tex.zip` 公式结果下载。
 - PDF 上传分析会固化 `pdfType`、文本层、图片对象、公式线索、表格线索和 OCR 建议；PDF 转 Word 引擎在设置保存和读取时都会归一为 Mathpix，避免 API 写入其他引擎绕过 Mathpix 合同。Mathpix PDF 请求会把 DOCX、`tex.zip` 等真实输出格式放入 `conversion_formats`，并把 K12 OCR 语言、文字/公式/表格开关、精度和速度模式作为审计元数据记录在作业中。文字、公式、表格 OCR 全部关闭时，PDF 转 Word 会阻止提交并在报告中记录 `ocr_disabled`。
 - 转换页的 PDF 工作区直接读取文件 `content_summary`、当前 OCR 设置、PDF 来源公式报告和 Mathpix artifacts，提供选择 PDF、跳转 OCR 设置和创建 `pdf_to_word` 导出任务的前端入口。
-- 每个 Mathpix PDF 作业会生成 `recognition_plan`、`retention_plan` 和脱敏 `request_options`，记录外部上传授权、凭证环境变量名、是否允许提交、图片对象、表格线索、公式线索、OCR 开关、实际 Mathpix 输出格式和图片/表格/公式保留状态。该计划在未授权外部上传或 OCR 全部关闭时也会进入报告，但不会触发实际上传。
+- 每个 Mathpix PDF 作业会生成 `recognition_plan`、`retention_plan`、`task_option_audit` 和脱敏 `request_options`，记录外部上传授权状态与来源、等待轮询来源、凭证环境变量名、是否允许提交、图片对象、表格线索、公式线索、OCR 开关、实际 Mathpix 输出格式和图片/表格/公式保留状态。`task_option_audit` 使用 `k12.mathpixTaskOptionAudit.v1`，审计并列出被忽略的任务参数授权键，例如 `allowExternalMathpixUpload` 和 `externalUploadAuthorized`，同时保持授权来源固定为 `settings.allowExternalMathpixUpload`。`recognition_plan.download_manifest` 会把 DOCX 和公式 OCR 开启时的 `tex.zip` 作为必需输出逐项记录下载、跳过、失败、待处理或未尝试状态、哈希可用性和失败原因，并保持本地路径隐藏。`recognition_plan.formula_review` 同步公式置信度阈值、低置信度处理策略、原图保留策略和人工校正接口，Mathpix `tex.zip` 公式低于阈值时会作为待确认公式进入报告。任务参数可以请求等待 Mathpix 完成，但不能临时授权外部上传；该计划在未授权外部上传或 OCR 全部关闭时也会进入报告，但不会触发实际上传。
 - `/api/mathpix-jobs` 从报告中的 Mathpix 作业记录派生队列，展示授权、凭证、OCR 关闭、提交、完成、识别计划和输出摘要状态；接口不调用 Mathpix，也不返回本地输出路径。
 - Mathpix 预检会在外部上传授权后检查 APP ID / APP KEY 环境变量是否存在，报告只展示环境变量名并隐藏实际凭证值。
 - Mathpix 完成后的 DOCX 和公式结果包会转为标准 `artifacts` 项，复用 `/api/artifacts/{task_id}/{file}` 下载和任务结果包。
@@ -50,7 +50,7 @@ K12 首版采用本地单机架构：
 - 微小图片检索从 OOXML 媒体目录提取图片，保存到 `.k12-data/images/`，通过受限 `/api/assets/images/...` 资源接口展示。
 - 图片检索设置控制最大宽高/面积、页眉页脚图片、水印、透明图、重复图和导出格式；图片 ZIP 清单会包含这些标记，并分列记录 area、image_format、suspected_type 和 confirmed_type。
 - 图片人工校正记录保存在 SQLite `image_annotations` 表中，支持类型已确认、误判、删除待处理和替换待处理；前端图片详情面板复用报告中的 smallImages 和人工标注记录，展示图片预览、位置、尺寸、面积、类型判断和标注状态，并可用图片 `file_id` 和 `location` 跳回来源文件预览；图片包由 `/api/reports/{report_id}/images.zip` 动态生成，微小图片清单由 `/api/reports/{report_id}/images.xlsx` 动态生成。
-- 公式人工校正记录保存在 SQLite `formula_annotations` 表中，由 `/api/formula-annotations` 提供确认、批量确认、跳过、重识别和 LaTeX 修正记录；公式页详情校正工作区复用报告中的公式项和人工校正记录，集中渲染原始公式截图引用、LaTeX 编辑、MathType 预览、MathML/OMML 结果、格式化参数和置信度。
+- 公式人工校正记录保存在 SQLite `formula_annotations` 表中，由 `/api/formula-annotations` 提供确认、批量确认、跳过、重识别和 LaTeX 修正记录；重识别会写入 `k12.formulaRecognitionRequest.v1` 请求合同，区分 Mathpix 外部上传授权/凭证门槛和同平台本地客户端门槛，但不会由任务参数临时触发外部上传。公式页详情校正工作区复用报告中的公式项和人工校正记录，集中渲染原始公式截图引用、LaTeX 编辑、MathType 预览、MathML/OMML 结果、格式化参数和置信度。
 - 公式识别结果由 `/api/reports/{report_id}/formulas.zip` 打包导出 JSON、TEX、MML 与逐条公式文件，也可通过 `/api/reports/{report_id}/formulas.xlsx` 导出表格清单。
 - OMML 人工校正记录保存在 SQLite `omml_annotations` 表中，由 `/api/omml-annotations` 提供转换失败、保留 OMML、重新转换、已修复和手动指定依赖路径记录；前端 OMML 依赖卡片会读取这些记录并提供保留、重新转换、已修复、指定依赖文件和导出 OMML 转换失败清单 CSV 的快捷操作，`manual_omml_path` 默认按本地路径脱敏返回。
 - 排版人工校正记录保存在 SQLite `layout_annotations` 表中，由 `/api/layout-annotations` 提供页码、标题层级、表格结构、图片位置、公式位置和公式编号校正记录；报告页排版校正表单会写入修复前后描述、建议和处理状态。公式识别项缺少位置时，报告生成器会写入异常位置并同步到失败清单、质量检查和公式导出清单。
@@ -58,7 +58,7 @@ K12 首版采用本地单机架构：
 - 源文件下载由 `/api/files/{file_id}/download` 提供，只返回文件名和二进制内容，不把本地路径写入下载响应。
 - 批量源文件下载由 `/api/files/download` 提供，支持 `ids` 或 `type` 查询参数，并输出带 `manifest.csv` 的 ZIP。
 - 文件列表的下载、替换和删除按钮直接映射到源文件下载、`/api/files/{file_id}/replace` 和 `DELETE /api/files/{file_id}`；替换和删除受 `files.manage` 权限控制。
-- 转换输出保存到 `.k12-data/outputs/{task_id}/`，通过受限 `/api/artifacts/{task_id}/{file}` 下载。
+- 转换输出保存到 `.k12-data/outputs/{task_id}/`，只有报告登记且状态成功的产物可通过受限 `/api/artifacts/{task_id}/{file}` 下载。
 - `outputDirectory` 为空或相对路径时解析到 `.k12-data/` 下，绝对路径则写入用户指定目录；报告会记录实际产物路径，避免之后改设置影响旧下载。
 - 转换 artifact 会写入 `conversion_settings` 设置快照，覆盖模板、模式、PDF 精度、Excel 范围、输出同名策略、Word 转 PPT 分页/目录/备注/美化参数、PPT 转 Word 目录、Word 模板、备注提取、图片提取和公式提取偏好，以及保留图片/表格/页眉页脚/脚注尾注/批注/修订标记偏好；Word 转 PPT artifact 还会写入 `object_preservation`，用于同步到 HTML/TXT/XLSX 报告和本地客户端复核。
 - `autoOpenOutputDirectory` 开启后，任务完成时只写入 `output_directory_action` 和日志，由后续本地客户端执行打开目录动作；网页端不直接打开本地路径。
@@ -95,21 +95,21 @@ PRD 中的敏感能力默认由本地客户端完成：
 - 网页端不直接执行 Word 宏；宏任务必须由本地客户端授权执行。
 - 本地 API 默认限制在 `127.0.0.1`，启用令牌后上传、设置、资源下载和报告导出都走同一套令牌校验。
 - `capabilities.localConnection` 暴露本地客户端启用状态、网页唤起授权、云端同步授权、任务状态同步授权和敏感文档本地优先策略。
-- `/api/local-client/manifest` 为桌面端提供运行清单，包含本地 API 地址、`k12-local://` 唤起协议、载荷接口、状态同步接口、心跳接口、支持动作、待本地任务数量和安装画像；`/api/local-client/heartbeat` 只保存平台、版本、状态、白名单能力摘要和脱敏组件预检，不保存令牌或本地路径。
-- `python3 -m k12.local_client` / `k12-local-client` 是标准库本地伴随 CLI，可独立读取 manifest、发送心跳、领取本地任务载荷并执行 dry-run 状态同步；心跳预检会检测 Office、MathType、LibreOffice 和 OMML 依赖是否可见，并仅回传组件状态和能力位。dry-run 会生成 `k12.localDryRunExecution.v1`，逐个动作记录 gate、所需能力、步骤数量、输出类型和等待/阻塞原因。`--native-plan` 会生成 `k12.localNativeExecutionRequest.v1` 原生执行请求合同，列出 Windows 同平台、能力门槛、操作步骤、输出类型和阻断原因，供后续 pywin32/Office COM 执行器接管。`--execute-file-actions` 会生成 `k12.localFileActionExecution.v1` 并执行 OMML 依赖复制等安全本地文件动作，目标必须是当前文档所在目录。当前 CLI 不执行 Office、MathType、OMML 写回或 Word 宏，也不会在摘要中输出本地路径或令牌。
+- `/api/local-client/manifest` 为桌面端提供运行清单，包含本地 API 地址、`k12-local://` 唤起协议、载荷接口、状态同步接口、心跳接口、支持动作、待本地任务数量和安装画像；`platform.installer` 使用 `k12.localInstallerManifest.v1` 暴露当前平台安装包文件名、类型、`/api/installers/{file_name}?platform=...` 下载地址、SHA256、校验要求和 MathType 原生对象边界，但不暴露 `installers/` 本地目录；`/api/local-client/heartbeat` 只保存平台、版本、状态、白名单能力摘要和脱敏组件预检，不保存令牌或本地路径。
+- `python3 -m k12.local_client` / `k12-local-client` 是标准库本地伴随 CLI，可独立读取 manifest、发送心跳、领取本地任务载荷并执行 dry-run 状态同步；心跳预检会检测 Office、MathType、LibreOffice 和 OMML 依赖是否可见，并仅回传组件状态和能力位。dry-run 会生成 `k12.localDryRunExecution.v1`，逐个动作记录 gate、所需能力、步骤数量、输出类型、同平台公式交付合同和等待/阻塞原因；即使动作 gate 已 ready，公式合同声明的 Windows/macOS 平台与执行平台不一致时也会进入平台阻断。`--native-plan` 会生成 `k12.localNativeExecutionRequest.v1` 原生执行请求合同，列出 Windows 同平台、能力门槛、操作步骤、输出类型和阻断原因，供后续 pywin32/Office COM 执行器接管。`--execute-file-actions` 会生成 `k12.localFileActionExecution.v1` 并执行 OMML 依赖复制等安全本地文件动作，目标必须是当前文档所在目录。当前 CLI 不执行 Office、MathType、OMML 写回或 Word 宏，也不会在摘要中输出本地路径或令牌。
 - 设置页异常处理面板会把系统异常预检拆成磁盘空间、文件权限、用户权限、本地客户端、客户端平台心跳、Office/MathType 组件、OCR 和宏授权明细，便于对应 PRD 12.7 的修复动作。任务预检会读取最近心跳中的脱敏组件能力，已连接客户端缺少当前任务必需能力时进入质量检查和失败清单。
 - `/api/tasks/{task_id}/local-launch` 在网页端点击启动本地客户端时生成可审计的启动请求，写回任务的 `local_launch_request`，返回不含令牌的 `k12-local://` 协议 URL；前端跳转前再把当前受令牌保护的载荷地址放入协议参数。
-- `/api/tasks/{task_id}/local-payload` 为本地客户端提供任务参数包，包含任务选项、输入文件本地路径、预检项、本地动作队列、桌面执行计划、客户端就绪判断、输出目录、公式交付合同和云端同步策略；`/api/tasks/{task_id}/local-readiness` 为网页端提供脱敏就绪状态，只返回任务摘要、握手状态、动作能力要求、能力缺口和桌面执行计划摘要，不返回输入路径、输出目录、组件路径或令牌。客户端就绪判断读取最近心跳的脱敏预检结果，按当前动作核对 Office 自动化、MathType 自动化、宏执行、OMML 依赖检索能力以及安装目标平台；当设置目标平台与心跳平台都是 Windows/macOS 且不一致时，状态为 `platform_mismatch`，避免平台专属 MathType/Office 对象跨系统交付。公式交付合同会把 Windows/macOS 平台、MathType 对象格式、跨平台不通用风险、输出优先级、兜底格式和是否允许平台专属 MathType 对象写入交给桌面端。桌面执行计划使用 `k12.desktopExecutionPlan.v1`，列出每个本地动作的能力门槛、授权门槛、平台门槛、步骤、输出合同和网页端不执行原生文档动作的边界。`/api/tasks/{task_id}/local-sync` 接收本地客户端回传的任务状态、进度、输出摘要、动作级 dry-run 校验摘要和结果上传意图。这些接口涉及本地任务交接，敏感载荷必须先配置本地安全令牌，状态同步还需要开启任务状态同步授权。
+- `/api/tasks/{task_id}/local-payload` 为本地客户端提供任务参数包，包含任务选项、输入文件本地路径、预检项、本地动作队列、桌面执行计划、客户端就绪判断、输出目录、公式交付合同和云端同步策略；公式人工校正中的重识别请求会作为 `recognition_requests` 进入 OMML/MathType 或 PDF 公式动作，桌面计划只列出本地客户端/Mathpix worker 所需步骤和阻断原因，不执行外部上传或原生写回。`/api/tasks/{task_id}/local-readiness` 为网页端提供脱敏就绪状态，只返回任务摘要、握手状态、动作能力要求、能力缺口和桌面执行计划摘要，不返回输入路径、输出目录、组件路径或令牌。客户端就绪判断读取最近心跳的脱敏预检结果，按当前动作核对 Office 自动化、MathType 自动化、宏执行、OMML 依赖检索能力以及安装目标平台；当设置目标平台与心跳平台都是 Windows/macOS 且不一致时，状态为 `platform_mismatch`，避免平台专属 MathType/Office 对象跨系统交付。公式交付合同会把 Windows/macOS 平台、MathType 对象格式、跨平台不通用风险、输出优先级、兜底格式和是否允许平台专属 MathType 对象写入交给桌面端。桌面执行计划使用 `k12.desktopExecutionPlan.v1`，列出每个本地动作的能力门槛、授权门槛、平台门槛、步骤、输出合同和网页端不执行原生文档动作的边界；本地伴随 CLI 的 `k12.localNativeExecutionRequest.v1` 额外返回平台执行器画像，Windows 画像指向未来 pywin32/Office COM 适配器，macOS 画像标记为受限交接，只允许人工复核和 MathML/LaTeX/图片兜底合同，不把 macOS MathType 对象交给 Windows 链路。`/api/tasks/{task_id}/local-sync` 接收本地客户端回传的任务状态、进度、输出摘要、动作级 dry-run 校验摘要和结果上传意图。这些接口涉及本地任务交接，敏感载荷必须先配置本地安全令牌，状态同步还需要开启任务状态同步授权。
 - `/api/local-client/uploads` 的 GET 从本地同步记录派生结果上传队列，展示本地客户端是否请求上传、云端同步是否授权、输出数量和脱敏输出摘要；POST 需要本地安全令牌和云端同步授权，可只登记上传包清单、输出哈希和大小，也可接收 `files` 中的 Base64 结果内容并写入受控 `cloud_uploads/{upload_id}/` 接收区，把状态更新为“已登记待云端接收”。`/api/local-client/uploads/{upload_id}/manifest` 返回云端接收清单，包含 upload_id、任务摘要、包哈希、输出名、大小、输出哈希、授权状态、内容传输模式和接收合同，设置页可从上传队列打开该清单。队列、登记响应和接收清单不暴露本地输出路径，也不回显文件内容。
 - `requireLogin=true` 时，本地 API 会检查当前用户是否已通过 `/api/session` 登录且允许登录；未登录时仅放行健康检查、用户列表和登录接口。
 - 文件、报告、任务控制和管理写接口会在处理器层检查角色权限：文件上传、替换、密码登记和删除需要 `files.manage`，报告删除需要 `reports.manage`，任务暂停、继续、取消、重试、失败文件跳过和备份恢复需要 `tasks.control`，用户管理需要 `users.manage`，通用模板和宏顺序模板需要 `templates.manage`，授权切换需要 `authorizations.manage`，设置保存需要 `settings.manage`；访客默认为只读，前端会读取当前用户有效权限并禁用无权限的文件密码、报告删除和任务控制按钮，`/api/api-catalog` 会暴露对应 `permission` 字段。
 - API 列表和详情响应默认脱敏本地路径，下载、恢复和打包仍由后端使用原始 store 数据；`exposeLocalPaths` 仅在用户明确开启时返回真实路径。
 - Windows 和 macOS 本地客户端使用不同安装画像；MathType 对象跨平台不通用，预检会对 OMML/MathType 相关任务提示平台专属对象风险，并支持 MathML/LaTeX/图片兜底策略。
 - `/api/install-profile` 可按设置或查询参数返回目标平台画像，用于安装前预检和前端实时预览。
-- `/api/install-plan` 返回平台安装计划，Windows 目标为 `.msi`，macOS 目标为 `.pkg`，并包含安装包状态、SHA256、步骤、令牌建议、客户端心跳平台匹配状态、`formula_compatibility` 公式交付合同和 MathType 跨平台兜底提示；公式交付合同固定声明 Windows/macOS MathType 原生对象不跨平台兼容、同平台原生对象要求和 MathML/LaTeX/图片兜底格式。只有 `.k12-data/installers/` 中存在真实安装包时，`/api/installers/{file_name}` 才会开放受控下载。
+- `/api/install-plan` 返回平台安装计划，Windows 目标为 `.msi`，macOS 目标为 `.pkg`，并包含安装包状态、SHA256、步骤、令牌建议、客户端心跳平台匹配状态、`formula_compatibility` 公式交付合同和 MathType 跨平台兜底提示；公式交付合同固定声明 Windows/macOS MathType 原生对象不跨平台兼容、同平台原生对象要求和 MathML/LaTeX/图片兜底格式。只有 `.k12-data/installers/` 中存在真实安装包时，`/api/installers/{file_name}` 才会开放受控下载，并通过响应头返回安装包边界、MathType 原生对象同平台边界、ASCII 兜底格式标识和 SHA256，避免中文 header 值导致 HTTP 编码失败。
 - `/api/architecture` 返回 PRD 第 16 章技术架构蓝图，包含当前 Python 本地 API、静态前端、SQLite/文件目录运行时，桌面端/网页端/本地服务/云端服务/任务队列/文档引擎/OCR/公式宏各层状态，以及本地任务载荷、状态同步、安装画像、能力探测和 Mathpix PDF 的接口合同。
 - `/api/api-catalog` 返回 V3.0 开放 API 目录，列出健康检查、文件、任务、报告、日志、设置、能力、安装画像、技术架构、本地任务载荷和本地状态同步等接口的方法、路径、鉴权要求和敏感标记；本地任务载荷固定标记为必须配置安全令牌。
-- `/api/acceptance-matrix` 返回 PRD 第 17 章逐条验收矩阵，按 10 个验收组和 96 个验收项标记已覆盖、合同覆盖、需本地/Mathpix 实测或缺口，并给出证据、当前状态和下一步；Word 转 PPT 与 PPT 转 Word 会运行临时 OOXML 产物自检来证明最小转换能力，Word 对象保留和已有 MathType 原样保留会运行临时 DOCX/公式项自检，公式批量/范围格式化和 LaTeX 转 MathType 预览会运行公式项自检，PPT 公式识别会运行临时 PPTX 公式线索自检，OMML 依赖检索/复制会运行临时目录自检，宏顺序执行交接和宏批量顺序会运行临时 `.docm` 队列自检，PDF 转 Word、扫描件 OCR 和公式 OCR 会运行不上传文件的 Mathpix 请求/输出合同自检，PDF 图片/表格保留会运行临时 PDF 图片 XObject 与表格线索自检，PDF 公式 MathType 后处理会运行临时 Mathpix `tex.zip` 自检，均不依赖历史任务样本。
+- `/api/acceptance-matrix` 返回 PRD 第 17 章逐条验收矩阵，按 10 个验收组和 96 个验收项标记已覆盖、合同覆盖、需本地/Mathpix 实测或缺口，并给出证据、当前状态、下一步和 `verification` 验证上下文；顶层 `uncovered_risks` 会汇总仍未真实覆盖的 Mathpix 授权/凭证/OCR 结果和本地桌面执行器/原生写回风险，避免把合同自检误报为真实执行完成。Word 转 PPT 与 PPT 转 Word 会运行临时 OOXML 产物自检来证明最小转换能力，Word 对象保留和已有 MathType 原样保留会运行临时 DOCX/公式项自检，公式批量/范围格式化和 LaTeX 转 MathType 预览会运行公式项自检，PPT 公式识别会运行临时 PPTX 公式线索自检，OMML 依赖检索/复制会运行临时目录自检，宏顺序执行交接和宏批量顺序会运行临时 `.docm` 队列自检，PDF 转 Word、扫描件 OCR 和公式 OCR 会运行不上传文件的 Mathpix 请求/输出合同自检，PDF 图片/表格保留会运行临时 PDF 图片 XObject 与表格线索自检，PDF 公式 MathType 后处理会运行临时 Mathpix `tex.zip` 自检，均不依赖历史任务样本。
 - `/api/product-summary` 返回 PRD 第 21 章产品总结，包含 13 条核心能力和四阶段产品路线，并把真实桌面执行、Mathpix 外部识别和私有化/AI 增强等能力标记为合同覆盖或规划中，避免误报为已完成。
 
 网页端和本地 API 只传递任务摘要、参数、状态和报告，不默认保存或上传完整正文内容。

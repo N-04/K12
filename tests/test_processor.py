@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import os
+import re
 import tempfile
 import unittest
 import zipfile
@@ -37,7 +38,7 @@ from k12.local_client import (
     sanitize_component_preflight,
     summarize_payload,
 )
-from k12.mathpix import MATHPIX_ERROR_DETAIL_LIMIT, MathpixApiError, MathpixClient
+from k12.mathpix import MATHPIX_ERROR_DETAIL_LIMIT, MathpixApiError, MathpixClient, MathpixConfigError
 from k12.models import Task
 from k12.processor import DocumentAnalyzer, TaskProcessor
 from k12.server import JsonError, K12RequestHandler
@@ -215,11 +216,20 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertIn("Report generation", reports_module.__doc__ or "")
         self.assertIn("local-client handoff", reports_module.__doc__ or "")
         self.assertIn("safe handoff step", local_client_module.LocalClientError.__doc__ or "")
+        self.assertEqual(local_client_module.LocalClientError.code, "local_client_error")
+        self.assertEqual(MathpixConfigError.code, "mathpix_config_error")
+        self.assertEqual(MathpixApiError.code, "mathpix_api_error")
+        self.assertIn("managed upload cache", store_module.AppStore._cleanup_uploaded_payloads.__doc__ or "")
+        self.assertIn("managed reports directory", store_module.AppStore._cleanup_report_files.__doc__ or "")
+        self.assertIn("managed image directory", store_module.AppStore._cleanup_report_image_files.__doc__ or "")
+        self.assertIn("task-scoped output", store_module.AppStore._cleanup_runtime_dirs.__doc__ or "")
         self.assertIn("local K12 API origin", local_client_module.normalize_origin.__doc__ or "")
         self.assertIn("path-redacted heartbeat", local_client_module.build_heartbeat.__doc__ or "")
         self.assertIn("never sends component paths or token material", local_client_module.build_heartbeat.__doc__ or "")
         self.assertIn("without leaking local paths or tokens", local_client_module.summarize_payload.__doc__ or "")
         self.assertIn("without executing native document actions", local_client_module.build_dry_run_execution_summary.__doc__ or "")
+        self.assertIn("same-platform formula delivery contract", local_client_module.build_dry_run_execution_summary.__doc__ or "")
+        self.assertIn("formula-platform checks", local_client_module._dry_run_blockers.__doc__ or "")
         self.assertIn("dry-run handoff validation only", local_client_module.build_dry_run_sync_payload.__doc__ or "")
         self.assertIn("same-platform native runner", local_client_module.build_native_execution_request.__doc__ or "")
         self.assertIn("does not run Office, MathType, OMML writeback, or Word macros", local_client_module.run_once.__doc__ or "")
@@ -236,12 +246,266 @@ class TaskProcessorTests(unittest.TestCase):
 
     def test_codebase_does_not_use_divider_comments(self) -> None:
         root = Path(__file__).resolve().parents[1]
-        forbidden = tuple("#" + marker for marker in ("—" * 4, "—" * 2, "----", " ===", "---"))
+        divider_pattern = re.compile(r"#\s*(?:-{3,}|={3,}|\u2014{2,})")
+        paths = [root / "README.md"]
         for folder in ("k12", "static", "tests", "docs"):
-            for path in (root / folder).rglob("*"):
-                if path.is_file() and path.suffix in {".py", ".js", ".css", ".html", ".md"}:
-                    text = path.read_text(encoding="utf-8", errors="ignore")
-                    self.assertFalse(any(marker in text for marker in forbidden), f"divider comment found in {path}")
+            paths.extend(path for path in (root / folder).rglob("*") if path.is_file())
+        for path in paths:
+            if path.suffix in {".py", ".js", ".css", ".html", ".md"}:
+                text = path.read_text(encoding="utf-8", errors="ignore")
+                self.assertIsNone(divider_pattern.search(text), f"divider comment found in {path}")
+
+    def test_app_store_methods_are_documented_and_timestamp_parsers_are_distinct(self) -> None:
+        source = Path(store_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        app_store_node = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AppStore")
+        methods = [node for node in app_store_node.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        missing_docstrings = [node.name for node in methods if ast.get_docstring(node) is None]
+        self.assertFalse(missing_docstrings, f"AppStore docstrings missing: {missing_docstrings}")
+        method_names = [node.name for node in methods]
+        self.assertEqual(method_names.count("_parse_timestamp"), 1)
+        self.assertEqual(method_names.count("_parse_cleanup_timestamp"), 1)
+        self.assertIn("missing or malformed", store_module.AppStore._parse_timestamp.__doc__ or "")
+        self.assertIn("retention comparisons", store_module.AppStore._parse_cleanup_timestamp.__doc__ or "")
+        cutoff = store_module.datetime.now(store_module.timezone.utc)
+        self.assertIsNone(store_module.AppStore._parse_timestamp(None))
+        self.assertFalse(store_module.AppStore._timestamp_at_or_before("not-a-date", cutoff))
+
+    def test_api_handler_methods_are_documented_for_sensitive_routes(self) -> None:
+        source = Path(server_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        class_names = {"JsonError", "K12RequestHandler", "K12Server"}
+        missing_docstrings: list[str] = []
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef) or node.name not in class_names:
+                continue
+            for member in node.body:
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(member) is None:
+                    missing_docstrings.append(f"{node.name}.{member.name}:{member.lineno}")
+        self.assertFalse(missing_docstrings, f"server method docstrings missing: {missing_docstrings}")
+        self.assertIn("Windows or macOS installer", server_module.K12RequestHandler._send_installer.__doc__ or "")
+        self.assertIn("MathType boundary headers", server_module.K12RequestHandler._send_installer.__doc__ or "")
+        self.assertIn("local security token", server_module.K12RequestHandler._ensure_authorized.__doc__ or "")
+        self.assertIn("local security token", server_module.K12RequestHandler._ensure_local_payload_token_configured.__doc__ or "")
+        self.assertIn("without trusting URL paths", server_module.K12RequestHandler._find_artifact_path.__doc__ or "")
+        self.assertIn("macOS", server_module.K12RequestHandler._redact_text_paths.__doc__ or "")
+        self.assertIn("Windows", server_module.K12RequestHandler._redact_text_paths.__doc__ or "")
+
+    def test_report_builder_methods_are_documented_for_prd_outputs(self) -> None:
+        source = Path(reports_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        report_builder = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "ReportBuilder")
+        missing_docstrings = [
+            f"ReportBuilder.{member.name}:{member.lineno}"
+            for member in report_builder.body
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(member) is None
+        ]
+        self.assertFalse(missing_docstrings, f"ReportBuilder docstrings missing: {missing_docstrings}")
+        self.assertIn("Mathpix", reports_module.ReportBuilder._failure_rows.__doc__ or "")
+        self.assertIn("local-client handoff", reports_module.ReportBuilder._macro_failure_policy_label.__doc__ or "")
+        self.assertIn("workflow order", reports_module.ReportBuilder._workflow_plan_metric.__doc__ or "")
+        self.assertIn("formula", reports_module.ReportBuilder._mathpix_ocr_label.__doc__ or "")
+        self.assertIn("XLSX", reports_module.ReportBuilder._write_xlsx.__doc__ or "")
+        self.assertIn("PDF renderer", reports_module.ReportBuilder._pdf_lines.__doc__ or "")
+
+    def test_export_helpers_are_documented_for_download_artifacts(self) -> None:
+        source = Path(exports_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        missing_docstrings = [
+            f"{member.name}:{member.lineno}"
+            for member in tree.body
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(member) is None
+        ]
+        self.assertFalse(missing_docstrings, f"export helper docstrings missing: {missing_docstrings}")
+        self.assertIn("macro failure CSV", exports_module._macro_failure_row_needed.__doc__ or "")
+        self.assertIn("OMML dependency", exports_module._omml_failure_row.__doc__ or "")
+        self.assertIn("Hide local paths", exports_module._export_path.__doc__ or "")
+        self.assertIn("path-free JSON", exports_module._formula_json.__doc__ or "")
+        self.assertIn("safe MathML text fallback", exports_module._formula_mathml.__doc__ or "")
+        self.assertIn("minimal XLSX workbook", exports_module._xlsx_bytes.__doc__ or "")
+        self.assertIn("deterministic export output", exports_module._csv_cell.__doc__ or "")
+
+    def test_converter_helpers_are_documented_for_local_first_outputs(self) -> None:
+        source = Path(converters_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        missing_docstrings = [
+            f"{member.name}:{member.lineno}"
+            for member in tree.body
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(member) is None
+        ]
+        self.assertFalse(missing_docstrings, f"converter helper docstrings missing: {missing_docstrings}")
+        self.assertIn("lightweight slides", converters_module._slides_from_blocks.__doc__ or "")
+        self.assertIn("without performing native writeback", converters_module._docx_object_preservation_lines.__doc__ or "")
+        self.assertIn("without claiming real rendering", converters_module._pptx_slide_summary.__doc__ or "")
+        self.assertIn("formula-like PPTX markers", converters_module._pptx_formula_count.__doc__ or "")
+        self.assertIn("lightweight PDF writer", converters_module._pdf_pages.__doc__ or "")
+        self.assertIn("minimal PPTX slide", converters_module._slide_xml.__doc__ or "")
+
+    def test_preview_helpers_are_documented_for_safe_ui_payloads(self) -> None:
+        source = Path(previews_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        missing_docstrings = [
+            f"{member.name}:{member.lineno}"
+            for member in tree.body
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(member) is None
+        ]
+        self.assertFalse(missing_docstrings, f"preview helper docstrings missing: {missing_docstrings}")
+        self.assertIn("metadata-first PDF preview", previews_module._pdf_preview.__doc__ or "")
+        self.assertIn("OCR and Mathpix hints", previews_module._pdf_preview.__doc__ or "")
+        self.assertIn("PRD-sensitive preview findings", previews_module._preview_markers.__doc__ or "")
+        self.assertIn("low-confidence warning marker", previews_module._has_low_confidence_hint.__doc__ or "")
+        self.assertIn("header bytes", previews_module._image_dimensions.__doc__ or "")
+
+    def test_document_analyzer_helpers_are_documented_for_prd_boundaries(self) -> None:
+        source = Path(processor_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        top_level_missing = [
+            f"{member.name}:{member.lineno}"
+            for member in tree.body
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(member) is None
+        ]
+        self.assertFalse(top_level_missing, f"processor module helper docstrings missing: {top_level_missing}")
+        analyzer = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "DocumentAnalyzer")
+        analyzer_missing = [
+            f"DocumentAnalyzer.{member.name}:{member.lineno}"
+            for member in analyzer.body
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(member) is None
+        ]
+        self.assertFalse(analyzer_missing, f"DocumentAnalyzer helper docstrings missing: {analyzer_missing}")
+        self.assertIn("without rendering page pixels", processor_module._pdf_image_descriptors.__doc__ or "")
+        self.assertIn("OMML conversion dependency", processor_module._find_direct_omml_file.__doc__ or "")
+        self.assertIn("Mathpix-oriented OCR planning", processor_module.DocumentAnalyzer._analyze_pdf.__doc__ or "")
+        self.assertIn("without uploading it", processor_module.DocumentAnalyzer._analyze_pdf.__doc__ or "")
+        self.assertIn("Mathpix OCR toggles", processor_module.DocumentAnalyzer._pdf_ocr_recommendation.__doc__ or "")
+
+    def test_task_processor_core_helpers_are_documented_for_local_handoff(self) -> None:
+        source = Path(processor_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        processor = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TaskProcessor")
+        missing_docstrings = [
+            f"TaskProcessor.{member.name}:{member.lineno}"
+            for member in processor.body
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and member.lineno < 1900
+            and ast.get_docstring(member) is None
+        ]
+        self.assertFalse(missing_docstrings, f"TaskProcessor core helper docstrings missing: {missing_docstrings}")
+        self.assertIn("draggable workflow order", processor_module.TaskProcessor._workflow_plan_from_options.__doc__ or "")
+        self.assertIn("dry-run execution summary", processor_module.TaskProcessor._local_sync_dry_run_execution.__doc__ or "")
+        self.assertIn("Windows/macOS client heartbeats", processor_module.TaskProcessor._preflight_local_client_platform.__doc__ or "")
+        self.assertIn("Mathpix upload authorization", processor_module.TaskProcessor._preflight_mathpix.__doc__ or "")
+        self.assertIn("same-platform delivery", processor_module.TaskProcessor._preflight_mathtype_compatibility.__doc__ or "")
+
+    def test_task_processor_prd_evidence_helpers_are_documented(self) -> None:
+        source = Path(processor_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        processor = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TaskProcessor")
+        methods = {node.name: node for node in processor.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        required = {
+            "_preflight_item",
+            "_dictionary_object",
+            "_api_endpoint",
+            "_acceptance_group",
+            "_acceptance_item",
+            "_acceptance_verification_context",
+            "_acceptance_current",
+            "_task_presence_current",
+            "_conversion_capability_probes",
+            "_probe_word_to_ppt_conversion",
+            "_probe_ppt_to_word_conversion",
+            "_conversion_probe_failure",
+            "_conversion_probe_current",
+            "_word_object_preservation_probe",
+            "_macro_batch_sequence_probe",
+            "_macro_ordered_execution_probe",
+            "_latex_mathtype_probe",
+            "_mathtype_preservation_probe",
+            "_omml_mathtype_handoff_probe",
+            "_local_api_security_probe",
+            "_local_result_upload_probe",
+            "_local_file_action_execution_probe",
+            "_formula_format_scope_probe",
+            "_macro_detection_probe",
+            "_ppt_formula_probe",
+            "_omml_dependency_probe",
+            "_omml_dependency_probe_current",
+            "_mathpix_contract_probe",
+            "_pdf_ocr_contract_probe",
+            "_pdf_retention_probe",
+            "_pdf_formula_handoff_probe",
+            "_mathpix_contract_probe_current",
+        }
+        missing_docstrings = [name for name in sorted(required) if ast.get_docstring(methods[name]) is None]
+        self.assertFalse(missing_docstrings, f"TaskProcessor PRD evidence helper docstrings missing: {missing_docstrings}")
+        self.assertIn("PRD acceptance group", processor_module.TaskProcessor._acceptance_group.__doc__ or "")
+        self.assertIn("without overstating local or external coverage", processor_module.TaskProcessor._acceptance_verification_context.__doc__ or "")
+        self.assertIn("without external upload", processor_module.TaskProcessor._mathpix_contract_probe.__doc__ or "")
+        self.assertIn("blocked upload risk", processor_module.TaskProcessor._pdf_ocr_contract_probe.__doc__ or "")
+        self.assertIn("OMML dependency", processor_module.TaskProcessor._local_file_action_execution_probe.__doc__ or "")
+
+    def test_task_processor_install_mathpix_helpers_are_documented(self) -> None:
+        source = Path(processor_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        processor = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TaskProcessor")
+        methods = {node.name: node for node in processor.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+        required = {
+            "_install_formula_compatibility_contract",
+            "_heartbeat_platform",
+            "_installer_heartbeat_readiness",
+            "_safe_local_client_preflight",
+            "_mathpix_queue_item",
+            "_mathpix_request_summary",
+            "_mathpix_status_label",
+            "_local_upload_item",
+            "_local_upload_outputs",
+            "_receive_local_upload_files",
+            "_unique_cloud_upload_path",
+            "_local_upload_manifest_files",
+            "_local_upload_manifest_outputs",
+            "_safe_sha256",
+            "_safe_output_name",
+            "_local_launch_origin",
+            "_product_capability",
+            "_product_phase",
+            "_enhancement_item",
+            "_installer_specs",
+            "_installer_spec",
+            "_installer_steps",
+            "_sha256",
+        }
+        missing_docstrings = [name for name in sorted(required) if ast.get_docstring(methods[name]) is None]
+        self.assertFalse(missing_docstrings, f"TaskProcessor install/Mathpix helper docstrings missing: {missing_docstrings}")
+        self.assertIn("Windows/macOS boundaries", processor_module.TaskProcessor._install_formula_compatibility_contract.__doc__ or "")
+        self.assertIn("heartbeat platform", processor_module.TaskProcessor._installer_heartbeat_readiness.__doc__ or "")
+        self.assertIn("without credentials or paths", processor_module.TaskProcessor._mathpix_request_summary.__doc__ or "")
+        self.assertIn("managed runtime storage", processor_module.TaskProcessor._receive_local_upload_files.__doc__ or "")
+        self.assertIn("Windows and macOS installer specifications", processor_module.TaskProcessor._installer_specs.__doc__ or "")
+
+    def test_task_processor_all_helpers_are_documented(self) -> None:
+        source = Path(processor_module.__file__).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        processor = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "TaskProcessor")
+        missing_docstrings = [
+            f"TaskProcessor.{member.name}:{member.lineno}"
+            for member in processor.body
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and ast.get_docstring(member) is None
+        ]
+        self.assertFalse(missing_docstrings, f"TaskProcessor helper docstrings missing: {missing_docstrings}")
+        self.assertIn("without performing native document actions", processor_module.TaskProcessor._local_desktop_execution_plan.__doc__ or "")
+        self.assertIn("without executing Word macros", processor_module.TaskProcessor._macro_items.__doc__ or "")
+        self.assertIn("Mathpix PDF-to-Word planning", processor_module.TaskProcessor._ocr_settings_snapshot.__doc__ or "")
+        self.assertIn("PDF image placeholder rows", processor_module.TaskProcessor._pdf_image_placeholders.__doc__ or "")
+
+    def test_python_codebase_definitions_are_documented(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "k12"
+        missing_docstrings: list[str] = []
+        for module_path in sorted(root.glob("*.py")):
+            tree = ast.parse(module_path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(node) is None:
+                    missing_docstrings.append(f"{module_path.name}:{node.lineno}:{node.name}")
+        self.assertFalse(missing_docstrings, f"Python definition docstrings missing: {missing_docstrings}")
 
     def test_task_generates_report_and_logs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -377,6 +641,35 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertFalse(legacy_output_dir.exists())
             self.assertFalse(backup_dir.exists())
             self.assertFalse(image_dir.exists())
+
+    def test_delete_report_removes_managed_small_image_cache_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            managed_image = store.images_dir / "task_image_cleanup" / "small.png"
+            external_image = Path(tmp) / "external-small.png"
+            managed_image.parent.mkdir(parents=True, exist_ok=True)
+            managed_image.write_bytes(make_png_bytes(16, 16))
+            external_image.write_bytes(make_png_bytes(16, 16))
+            store.save_report(
+                {
+                    "id": "report_image_cleanup",
+                    "task_id": "task_image_cleanup",
+                    "created_at": "2026-01-01T00:00:00+00:00",
+                    "analysis": {
+                        "smallImages": [
+                            {"image_path": str(managed_image)},
+                            {"image_path": str(external_image)},
+                        ]
+                    },
+                }
+            )
+
+            result = store.delete_report("report_image_cleanup")
+
+            self.assertTrue(result["deleted"])
+            self.assertEqual(result["image_files_deleted"], 1)
+            self.assertFalse(managed_image.exists())
+            self.assertTrue(external_image.exists())
 
     def test_disabling_history_removes_completed_task_report_logs_and_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -545,6 +838,7 @@ class TaskProcessorTests(unittest.TestCase):
                     "task_type": "macro_sequence",
                     "file_ids": [word["id"]],
                     "options": {
+                        "workflowOrder": ["pdf_to_word", "macro_sequence", "small_image_scan"],
                         "selectedMacros": [{"id": "macro_clean_empty_paragraphs", "execute_order": 1}],
                         "confirmMacroRisk": True,
                         "macroBackup": True,
@@ -868,6 +1162,7 @@ class TaskProcessorTests(unittest.TestCase):
                     "task_type": "macro_sequence",
                     "file_ids": [word["id"]],
                     "options": {
+                        "workflowOrder": ["pdf_to_word", "macro_sequence", "small_image_scan"],
                         "selectedMacros": [{"id": "macro_clean_empty_paragraphs", "execute_order": 1}],
                         "confirmMacroRisk": True,
                         "macroBackup": True,
@@ -1559,6 +1854,39 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertTrue(plan["requires_user_decision"])
             self.assertEqual(report["batch_failure_strategy"], "询问")
 
+    def test_task_workflow_order_is_normalized_and_reported(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            processor = TaskProcessor(store)
+            word = processor.create_uploaded_file("lesson.docx", make_docx_bytes())[0]
+
+            task = processor.create_task(
+                {
+                    "task_type": "word_to_ppt",
+                    "file_ids": [word["id"]],
+                    "options": {
+                        "workflowOrder": ["pdf_to_word", "not_a_task", "pdf_to_word", "small_image_scan"],
+                        "workflowLabels": ["伪造标签"],
+                    },
+                }
+            )
+            report = store.list_reports()[0]
+            plan = task["options"]["workflowPlan"]
+            quality = {item["id"]: item for item in report["qualityChecks"]}
+
+            self.assertEqual(task["options"]["workflowOrder"], ["word_to_ppt", "pdf_to_word", "small_image_scan"])
+            self.assertEqual(task["options"]["workflowLabels"], ["Word 转 PPT", "PDF 转 Word", "微小图片检索"])
+            self.assertEqual(plan["version"], "k12.workflowPlan.v1")
+            self.assertEqual(plan["current_index"], 1)
+            self.assertEqual(plan["invalid_items"], ["not_a_task"])
+            self.assertEqual(plan["duplicate_items"], ["pdf_to_word"])
+            self.assertEqual(report["analysis"]["workflowPlan"], plan)
+            self.assertEqual(quality["workflow_order"]["status"], "需确认")
+            self.assertIn("Word 转 PPT → PDF 转 Word → 微小图片检索", quality["workflow_order"]["metric"])
+            self.assertIn("已过滤未知任务：not_a_task", quality["workflow_order"]["message"])
+            self.assertIn("已去除重复任务：pdf_to_word", quality["workflow_order"]["message"])
+            self.assertIn("流程顺序", Path(report["txt_path"]).read_text(encoding="utf-8"))
+
     def test_batch_failed_file_can_be_skipped_and_report_rebuilt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = AppStore(tmp)
@@ -1719,7 +2047,7 @@ class TaskProcessorTests(unittest.TestCase):
                     {
                         "task_type": "pdf_to_word",
                         "file_ids": [pdf["id"]],
-                        "options": {"allowExternalMathpixUpload": True, "waitForMathpix": True},
+                        "options": {"allowExternalMathpixUpload": True, "externalUploadAuthorized": True, "waitForMathpix": True},
                     }
                 )
 
@@ -1727,15 +2055,31 @@ class TaskProcessorTests(unittest.TestCase):
             report = store.list_reports()[0]
             mathpix = report["analysis"]["mathpix"][0]
             recognition_plan = mathpix["recognition_plan"]
+            task_option_audit = recognition_plan["task_option_audit"]
 
             self.assertEqual(task["status"], "成功")
             self.assertEqual(mathpix["status"], "authorization_required")
             self.assertEqual(recognition_plan["status"], "blocked_authorization")
             self.assertFalse(recognition_plan["submit_allowed"])
             self.assertFalse(recognition_plan["external_upload_authorized"])
+            self.assertEqual(recognition_plan["external_upload_authorization_source"], "settings.allowExternalMathpixUpload")
             self.assertEqual(recognition_plan["upload_gate"]["status"], "blocked_authorization")
             self.assertIn("external_upload_not_authorized", recognition_plan["upload_gate"]["blocking_reasons"])
+            self.assertEqual(recognition_plan["upload_gate"]["authorization_source"], "settings.allowExternalMathpixUpload")
+            self.assertFalse(recognition_plan["upload_gate"]["task_options_can_authorize"])
+            self.assertTrue(recognition_plan["submit_contract"]["wait_for_completion"])
+            self.assertEqual(recognition_plan["submit_contract"]["wait_for_completion_source"], "task_options")
+            self.assertEqual(task_option_audit["schema_version"], "k12.mathpixTaskOptionAudit.v1")
+            self.assertFalse(task_option_audit["task_options_can_authorize_external_upload"])
+            self.assertEqual(task_option_audit["authorization_source"], "settings.allowExternalMathpixUpload")
+            self.assertEqual(task_option_audit["ignored_authorization_keys"], ["allowExternalMathpixUpload", "externalUploadAuthorized"])
+            self.assertEqual(task_option_audit["ignored_authorization_count"], 2)
+            self.assertTrue(task_option_audit["wait_for_completion_option_present"])
+            self.assertTrue(task_option_audit["wait_for_completion_can_be_requested"])
+            self.assertEqual(recognition_plan["safety"]["ignored_task_option_authorization_count"], 2)
             self.assertTrue(recognition_plan["safety"]["task_options_cannot_authorize_external_upload"])
+            self.assertTrue(recognition_plan["safety"]["task_options_may_request_wait_for_completion"])
+            self.assertEqual(processor.mathpix_job_queue()["jobs"][0]["recognition_plan"]["task_option_audit"], task_option_audit)
 
     def test_pdf_ocr_contract_probe_keeps_mathpix_upload_blocked_without_authorization(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1810,6 +2154,9 @@ class TaskProcessorTests(unittest.TestCase):
                     "enableTableOcr": False,
                     "ocrPrecisionMode": "高精度",
                     "ocrSpeedMode": "优先速度",
+                    "formulaConfidenceThreshold": 95,
+                    "lowConfidenceFormulaStrategy": "标记重识别",
+                    "keepFormulaImages": False,
                 }
             )
             processor = TaskProcessor(store)
@@ -1853,6 +2200,16 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(recognition_plan["submit_contract"]["conversion_formats"], ["docx", "tex.zip"])
             self.assertEqual(recognition_plan["submit_contract"]["download_formats"], ["docx", "tex.zip"])
             self.assertTrue(recognition_plan["submit_contract"]["wait_for_completion"])
+            self.assertEqual(recognition_plan["submit_contract"]["wait_for_completion_source"], "settings")
+            self.assertEqual(recognition_plan["formula_review"]["schema_version"], "k12.formulaReviewContract.v1")
+            self.assertEqual(recognition_plan["formula_review"]["confidence_threshold"], 95)
+            self.assertEqual(recognition_plan["formula_review"]["low_confidence_strategy"], "标记重识别")
+            self.assertFalse(recognition_plan["formula_review"]["keep_original_image"])
+            self.assertIn("重新识别", recognition_plan["formula_review"]["manual_actions"])
+            self.assertEqual(recognition_plan["formula_review"]["annotation_endpoint"], "/api/formula-annotations")
+            self.assertEqual(recognition_plan["external_upload_authorization_source"], "settings.allowExternalMathpixUpload")
+            self.assertEqual(recognition_plan["upload_gate"]["authorization_source"], "settings.allowExternalMathpixUpload")
+            self.assertFalse(recognition_plan["upload_gate"]["task_options_can_authorize"])
             self.assertEqual(mathpix["tex_zip_status"], "completed")
             self.assertEqual(mathpix["ocr_settings"]["language"], "中文")
             self.assertFalse(mathpix["ocr_settings"]["table_ocr"])
@@ -1866,6 +2223,8 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(fake_client.options["metadata"]["k12_speed_mode"], "优先速度")
             self.assertEqual(mathpix["request_options"]["conversion_formats"], {"docx": True, "tex.zip": True})
             self.assertIn("tex_zip", mathpix["outputs"])
+            self.assertIn("docx", mathpix["output_summaries"])
+            self.assertIn("tex_zip", mathpix["output_summaries"])
             self.assertEqual(artifact["output_type"], "docx")
             self.assertEqual(artifact["status"], "成功")
             self.assertTrue(Path(artifact["path"]).exists())
@@ -1873,16 +2232,48 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(tex_artifact["output_type"], "tex.zip")
             self.assertEqual(tex_artifact["status"], "成功")
             self.assertTrue(Path(tex_artifact["path"]).exists())
+            docx_summary = mathpix["output_summaries"]["docx"]
+            tex_summary = mathpix["output_summaries"]["tex_zip"]
+            self.assertEqual(docx_summary["size"], Path(artifact["path"]).stat().st_size)
+            self.assertEqual(docx_summary["sha256"], hashlib.sha256(Path(artifact["path"]).read_bytes()).hexdigest())
+            self.assertEqual(tex_summary["size"], Path(tex_artifact["path"]).stat().st_size)
+            self.assertEqual(tex_summary["sha256"], hashlib.sha256(Path(tex_artifact["path"]).read_bytes()).hexdigest())
+            self.assertEqual(recognition_plan["download_results"]["docx"]["sha256"], docx_summary["sha256"])
+            self.assertEqual(recognition_plan["download_results"]["tex_zip"]["sha256"], tex_summary["sha256"])
+            self.assertFalse(recognition_plan["download_results"]["docx"]["path_exposed"])
+            download_manifest = recognition_plan["download_manifest"]
+            manifest_outputs = {item["type"]: item for item in download_manifest["outputs"]}
+            self.assertEqual(download_manifest["schema_version"], "k12.mathpixDownloadManifest.v1")
+            self.assertEqual(download_manifest["status"], "complete")
+            self.assertEqual(download_manifest["required_output_count"], 2)
+            self.assertEqual(download_manifest["satisfied_required_count"], 2)
+            self.assertEqual(download_manifest["failed_required_count"], 0)
+            self.assertTrue(download_manifest["all_required_outputs_satisfied"])
+            self.assertTrue(download_manifest["all_required_outputs_hashed"])
+            self.assertEqual(manifest_outputs["docx"]["status"], "downloaded")
+            self.assertTrue(manifest_outputs["docx"]["sha256_available"])
+            self.assertFalse(manifest_outputs["docx"]["path_exposed"])
+            self.assertEqual(manifest_outputs["tex.zip"]["status"], "downloaded")
+            self.assertTrue(recognition_plan["safety"]["download_integrity_hashed"])
+            self.assertTrue(recognition_plan["safety"]["required_outputs_satisfied"])
             with zipfile.ZipFile(tex_artifact["path"]) as archive:
                 self.assertIn("formula.tex", archive.namelist())
             self.assertTrue(any(item["source_type"] == "PDF" and "x^2+y^2=z^2" in item["latex"] for item in formulas))
             pdf_formula = next(item for item in formulas if item["source_type"] == "PDF")
             self.assertTrue(pdf_formula["original_image_ref"].startswith(f"mathpix://{pdf['id']}/"))
             self.assertIn("MathType 预览", pdf_formula["mathtype_preview"])
+            self.assertEqual(pdf_formula["confidence"], 88)
+            self.assertEqual(pdf_formula["confidence_threshold"], 95)
+            self.assertEqual(pdf_formula["status"], "待确认")
+            self.assertTrue(pdf_formula["review_required"])
+            self.assertEqual(pdf_formula["review_reason"], "低于当前置信度阈值")
+            self.assertEqual(pdf_formula["low_confidence_strategy"], "标记重识别")
+            self.assertFalse(pdf_formula["keep_original_image"])
             self.assertEqual(report["formula_count"], len(formulas))
             with zipfile.ZipFile(BytesIO(build_formula_zip(report, []))) as archive:
                 self.assertIn("x^2+y^2=z^2", archive.read("formulas.tex").decode("utf-8"))
             self.assertEqual(quality["mathpix_pdf"]["status"], "通过")
+            self.assertEqual(quality["formula_confidence"]["status"], "需确认")
             self.assertEqual(quality["conversion_output"]["status"], "通过")
             queue = processor.mathpix_job_queue()
             self.assertEqual(queue["summary"]["completed"], 1)
@@ -1891,9 +2282,18 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertTrue(queue["jobs"][0]["recognition_plan"]["submit_allowed"])
             self.assertEqual(queue["jobs"][0]["recognition_plan"]["upload_gate"]["status"], "completed")
             self.assertEqual(queue["jobs"][0]["recognition_plan"]["download_formats"], ["docx", "tex.zip"])
+            self.assertEqual(queue["jobs"][0]["recognition_plan"]["download_results"]["docx"]["sha256"], docx_summary["sha256"])
+            self.assertEqual(queue["jobs"][0]["recognition_plan"]["download_manifest"]["status"], "complete")
+            self.assertTrue(queue["jobs"][0]["recognition_plan"]["download_manifest"]["all_required_outputs_hashed"])
+            self.assertEqual(queue["jobs"][0]["recognition_plan"]["formula_review"]["confidence_threshold"], 95)
+            self.assertEqual(queue["jobs"][0]["recognition_plan"]["formula_review"]["low_confidence_strategy"], "标记重识别")
             self.assertTrue(queue["jobs"][0]["request"]["formula_zip_requested"])
             self.assertIn("k12_ocr_language", queue["jobs"][0]["request"]["metadata_keys"])
-            self.assertEqual(queue["jobs"][0]["outputs"][0]["path_display"], "本地路径已隐藏")
+            queue_outputs = {item["type"]: item for item in queue["jobs"][0]["outputs"]}
+            self.assertEqual(queue_outputs["docx"]["path_display"], "本地路径已隐藏")
+            self.assertEqual(queue_outputs["docx"]["sha256"], docx_summary["sha256"])
+            self.assertEqual(queue_outputs["docx"]["file_size"], docx_summary["size"])
+            self.assertEqual(queue_outputs["tex_zip"]["sha256"], tex_summary["sha256"])
             self.assertNotIn(str(Path(tex_artifact["path"]).parent), json.dumps(queue, ensure_ascii=False))
             payload = processor.local_task_payload(task["id"])
             pdf_action = next(action for action in payload["local_actions"] if action["type"] == "pdf_formula_mathtype")
@@ -1930,6 +2330,166 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(pdf_items["17.6.1"]["status"], "已覆盖")
             self.assertIn("已有 Mathpix DOCX 完成记录", pdf_items["17.6.1"]["evidence"])
             self.assertIn("已有完成 DOCX", pdf_items["17.6.1"]["current"])
+
+    def test_pdf_to_word_task_option_wait_is_reported_without_authorizing_upload(self) -> None:
+        class FakeMathpixClient:
+            def __init__(self) -> None:
+                self.wait_called = False
+
+            def submit_pdf(self, path: Path, options: dict) -> dict:
+                return {"pdf_id": "pdf_wait_task_option"}
+
+            def wait_for_pdf(self, pdf_id: str, timeout_seconds: int) -> dict:
+                self.wait_called = True
+                return {"status": "completed", "percent_done": 100}
+
+            def download_pdf_result(self, pdf_id: str, extension: str) -> bytes:
+                return make_docx_bytes()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            store.update_settings(
+                {
+                    "allowExternalMathpixUpload": True,
+                    "waitForMathpix": False,
+                    "enableFormulaOcr": False,
+                }
+            )
+            processor = TaskProcessor(store)
+            pdf = processor.create_uploaded_file("scan.pdf", b"%PDF-1.4\n1 0 obj<< /Type /Page >>endobj\n")[0]
+            fake_client = FakeMathpixClient()
+
+            with patch("k12.processor.MathpixClient.from_environment", return_value=fake_client):
+                task = processor.create_task(
+                    {
+                        "task_type": "pdf_to_word",
+                        "file_ids": [pdf["id"]],
+                        "options": {"waitForMathpix": True},
+                    }
+                )
+
+            report = store.list_reports()[0]
+            mathpix = report["analysis"]["mathpix"][0]
+            recognition_plan = mathpix["recognition_plan"]
+            queue_job = processor.mathpix_job_queue()["jobs"][0]["recognition_plan"]
+
+            self.assertEqual(task["status"], "成功")
+            self.assertTrue(fake_client.wait_called)
+            self.assertEqual(mathpix["status"], "completed")
+            self.assertTrue(recognition_plan["submit_contract"]["wait_for_completion"])
+            self.assertEqual(recognition_plan["submit_contract"]["wait_for_completion_source"], "task_options")
+            self.assertTrue(recognition_plan["external_upload_authorized"])
+            self.assertEqual(recognition_plan["external_upload_authorization_source"], "settings.allowExternalMathpixUpload")
+            self.assertEqual(recognition_plan["upload_gate"]["authorization_source"], "settings.allowExternalMathpixUpload")
+            self.assertFalse(recognition_plan["upload_gate"]["task_options_can_authorize"])
+            self.assertEqual(queue_job["wait_for_completion_source"], "task_options")
+            self.assertEqual(queue_job["external_upload_authorization_source"], "settings.allowExternalMathpixUpload")
+            self.assertFalse(queue_job["upload_gate"]["task_options_can_authorize"])
+
+    def test_pdf_to_word_mathpix_tex_zip_download_failure_is_visible(self) -> None:
+        class TexZipFailureMathpixClient:
+            def submit_pdf(self, path: Path, options: dict) -> dict:
+                return {"pdf_id": "pdf_tex_zip_failure"}
+
+            def wait_for_pdf(self, pdf_id: str, timeout_seconds: int) -> dict:
+                return {"status": "completed", "percent_done": 100}
+
+            def download_pdf_result(self, pdf_id: str, extension: str) -> bytes:
+                if extension == "tex.zip":
+                    raise MathpixApiError("tex.zip download failed")
+                return make_docx_bytes()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            store.update_settings({"allowExternalMathpixUpload": True, "waitForMathpix": True, "enableFormulaOcr": True})
+            processor = TaskProcessor(store)
+            pdf = processor.create_uploaded_file("formula-result.pdf", b"%PDF-1.4\n1 0 obj<< /Type /Page >>(Formula) Tj endobj\n")[0]
+
+            with patch("k12.processor.MathpixClient.from_environment", return_value=TexZipFailureMathpixClient()):
+                processor.create_task({"task_type": "pdf_to_word", "file_ids": [pdf["id"]]})
+
+            report = store.list_reports()[0]
+            mathpix = report["analysis"]["mathpix"][0]
+            artifacts = report["analysis"]["artifacts"]
+            artifact_statuses = [artifact["status"] for artifact in artifacts]
+            queue = processor.mathpix_job_queue()
+
+            self.assertEqual(mathpix["status"], "completed")
+            self.assertEqual(mathpix["tex_zip_status"], "download_failed")
+            self.assertIn("tex.zip download failed", mathpix["tex_zip_message"])
+            self.assertIn("docx", mathpix["output_summaries"])
+            self.assertNotIn("tex_zip", mathpix["output_summaries"])
+            self.assertEqual(mathpix["recognition_plan"]["download_failures"][0]["type"], "tex.zip")
+            download_manifest = mathpix["recognition_plan"]["download_manifest"]
+            manifest_outputs = {item["type"]: item for item in download_manifest["outputs"]}
+            self.assertEqual(download_manifest["status"], "partial_failed")
+            self.assertEqual(download_manifest["required_output_count"], 2)
+            self.assertEqual(download_manifest["satisfied_required_count"], 1)
+            self.assertEqual(download_manifest["failed_required_count"], 1)
+            self.assertFalse(download_manifest["all_required_outputs_satisfied"])
+            self.assertFalse(download_manifest["all_required_outputs_hashed"])
+            self.assertEqual(manifest_outputs["docx"]["status"], "downloaded")
+            self.assertEqual(manifest_outputs["tex.zip"]["status"], "failed")
+            self.assertIn("tex.zip download failed", manifest_outputs["tex.zip"]["failure_message"])
+            self.assertFalse(mathpix["recognition_plan"]["safety"]["download_integrity_hashed"])
+            self.assertFalse(mathpix["recognition_plan"]["safety"]["required_outputs_satisfied"])
+            self.assertIn("成功", artifact_statuses)
+            self.assertIn("mathpix_tex_zip_download_failed", artifact_statuses)
+            self.assertEqual(queue["summary"]["completed"], 1)
+            self.assertEqual(queue["summary"]["partial_failed"], 1)
+            self.assertEqual(queue["summary"]["failed"], 0)
+            self.assertEqual(queue["jobs"][0]["tex_zip_status"], "download_failed")
+            self.assertEqual(queue["jobs"][0]["recognition_plan"]["download_failures"][0]["type"], "tex.zip")
+            self.assertEqual(queue["jobs"][0]["recognition_plan"]["download_manifest"]["status"], "partial_failed")
+            self.assertEqual([item["type"] for item in queue["jobs"][0]["outputs"]], ["docx"])
+
+    def test_pdf_to_word_empty_mathpix_docx_download_is_reported_as_failure(self) -> None:
+        class EmptyDocxMathpixClient:
+            def submit_pdf(self, path: Path, options: dict) -> dict:
+                return {"pdf_id": "pdf_empty_docx"}
+
+            def wait_for_pdf(self, pdf_id: str, timeout_seconds: int) -> dict:
+                return {"status": "completed", "percent_done": 100}
+
+            def download_pdf_result(self, pdf_id: str, extension: str) -> bytes:
+                return b""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            store.update_settings(
+                {
+                    "allowExternalMathpixUpload": True,
+                    "waitForMathpix": True,
+                    "enableFormulaOcr": False,
+                }
+            )
+            processor = TaskProcessor(store)
+            pdf = processor.create_uploaded_file("empty-result.pdf", b"%PDF-1.4\n1 0 obj<< /Type /Page >>endobj\n")[0]
+
+            with patch("k12.processor.MathpixClient.from_environment", return_value=EmptyDocxMathpixClient()):
+                processor.create_task({"task_type": "pdf_to_word", "file_ids": [pdf["id"]]})
+
+            report = store.list_reports()[0]
+            mathpix = report["analysis"]["mathpix"][0]
+            artifact = report["analysis"]["artifacts"][0]
+            queue = processor.mathpix_job_queue()
+
+            self.assertEqual(mathpix["status"], "download_failed")
+            self.assertEqual(mathpix["recognition_plan"]["status"], "download_failed")
+            self.assertEqual(mathpix["recognition_plan"]["upload_gate"]["status"], "download_failed")
+            self.assertEqual(mathpix["output_summaries"], {})
+            download_manifest = mathpix["recognition_plan"]["download_manifest"]
+            self.assertEqual(download_manifest["status"], "failed")
+            self.assertEqual(download_manifest["required_output_count"], 1)
+            self.assertEqual(download_manifest["failed_required_count"], 1)
+            self.assertFalse(download_manifest["all_required_outputs_satisfied"])
+            self.assertEqual(download_manifest["outputs"][0]["type"], "docx")
+            self.assertEqual(download_manifest["outputs"][0]["status"], "failed")
+            self.assertIn("下载结果为空", mathpix["message"])
+            self.assertEqual(artifact["status"], "download_failed")
+            self.assertIn("下载结果为空", artifact["message"])
+            self.assertEqual(queue["summary"]["failed"], 1)
+            self.assertEqual(queue["jobs"][0]["outputs"], [])
 
     def test_mathpix_pdf_options_keep_conversion_formats_separate_from_local_ocr_metadata(self) -> None:
         default_options = MathpixClient._pdf_options({})
@@ -2052,6 +2612,29 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertIn("plain_line=\\sqrt{n}", formulas)
         self.assertFalse(any("\\documentclass" in item for item in formulas))
         self.assertFalse(any("\\section" in item for item in formulas))
+
+    def test_mathpix_tex_formula_parser_skips_oversized_tex_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            processor = TaskProcessor(store)
+            pdf = processor.create_uploaded_file("formula.pdf", b"%PDF-1.4\n1 0 obj<< /Type /Page >>(Formula) Tj endobj\n")[0]
+            tex_zip = Path(tmp) / "mathpix-formulas.zip"
+            with zipfile.ZipFile(tex_zip, "w", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("too-large.tex", ("x" * (1024 * 1024 + 1)) + "\n$$too_big=1$$")
+                archive.writestr("nested/small.tex", "$$small=1$$")
+            job = {
+                "file_id": pdf["id"],
+                "file_name": pdf["file_name"],
+                "engine": "Mathpix",
+                "status": "completed",
+                "outputs": {"tex_zip": str(tex_zip)},
+            }
+
+            formulas = processor._mathpix_formula_items([pdf], [job])
+
+            self.assertEqual([item["latex"] for item in formulas], ["small=1"])
+            self.assertEqual(formulas[0]["position"], "Mathpix OCR / small.tex")
+            self.assertEqual(formulas[0]["original_image_ref"], f"mathpix://{pdf['id']}/small.tex")
 
     def test_pdf_to_word_skips_mathpix_when_ocr_is_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -2874,6 +3457,188 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(annotations[0]["formula_id"], formula["id"])
             self.assertTrue(processor.delete_formula_annotation(annotation["id"]))
 
+    def test_formula_rerecognition_records_mathpix_gate_without_uploading(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            store.update_settings({"allowExternalMathpixUpload": False})
+            processor = TaskProcessor(store)
+            report = store.save_report(
+                {
+                    "id": "report_formula_retry",
+                    "task_id": "task_formula_retry",
+                    "report_type": "PDF 公式报告",
+                    "created_at": "2026-06-24T00:00:00+00:00",
+                    "files": [{"id": "file_pdf", "file_name": "scan.pdf"}],
+                    "analysis": {
+                        "formulas": [
+                            {
+                                "id": "formula_pdf_retry",
+                                "file_id": "file_pdf",
+                                "source_type": "PDF",
+                                "position": "第 1 页",
+                                "latex": "x+y",
+                                "confidence": 62,
+                                "status": "待确认",
+                                "original_image_ref": "/api/assets/images/task/formula.png",
+                            }
+                        ]
+                    },
+                }
+            )
+
+            annotation = processor.save_formula_annotation(
+                {"report_id": report["id"], "formula_id": "formula_pdf_retry", "status": "重新识别", "note": "重新跑公式 OCR"}
+            )
+            request = annotation["recognition_request"]
+
+            self.assertTrue(annotation["retry_recognition"])
+            self.assertEqual(annotation["recognition_status"], "blocked")
+            self.assertEqual(request["schema_version"], "k12.formulaRecognitionRequest.v1")
+            self.assertEqual(request["engine"], "Mathpix")
+            self.assertTrue(request["external_upload_required"])
+            self.assertFalse(request["external_upload_authorized"])
+            self.assertFalse(request["external_upload_performed"])
+            self.assertFalse(request["task_options_can_authorize_external_upload"])
+            self.assertIn("external_mathpix_upload_not_authorized", request["blocking_reasons"])
+            self.assertIn("授权外部上传", request["next_step"])
+
+            formula_zip = build_formula_zip(report, [annotation])
+            with zipfile.ZipFile(BytesIO(formula_zip)) as archive:
+                formula_json = json.loads(archive.read("formulas.json").decode("utf-8"))
+                manifest = archive.read("manifest.csv").decode("utf-8")
+            exported = formula_json["formulas"][0]
+            self.assertTrue(exported["retry_recognition"])
+            self.assertEqual(exported["recognition_status"], "blocked")
+            self.assertEqual(exported["recognition_request"]["engine"], "Mathpix")
+            self.assertIn("recognition_status", manifest)
+
+            formula_xlsx = build_formula_xlsx(report, [annotation])
+            with zipfile.ZipFile(BytesIO(formula_xlsx)) as archive:
+                sheet_xml = archive.read("xl/worksheets/sheet1.xml").decode("utf-8")
+            self.assertIn("retry_recognition", sheet_xml)
+            self.assertIn("recognition_status", sheet_xml)
+
+    def test_formula_rerecognition_routes_latex_to_local_client_contract(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            processor = TaskProcessor(store)
+            report = store.save_report(
+                {
+                    "id": "report_latex_retry",
+                    "task_id": "task_latex_retry",
+                    "report_type": "公式报告",
+                    "created_at": "2026-06-24T00:00:00+00:00",
+                    "files": [{"id": "file_word", "file_name": "lesson.docx"}],
+                    "analysis": {"formulas": [{"id": "formula_latex", "file_id": "file_word", "source_type": "LaTeX", "latex": "a=b", "confidence": 90}]},
+                }
+            )
+
+            annotation = processor.save_formula_annotation({"report_id": report["id"], "formula_id": "formula_latex", "status": "重识别"})
+            request = annotation["recognition_request"]
+
+            self.assertEqual(annotation["status"], "重新识别")
+            self.assertEqual(request["engine"], "local-client")
+            self.assertEqual(request["status"], "queued_for_local_client")
+            self.assertFalse(request["external_upload_required"])
+            self.assertIn("同平台 Office/MathType 本地客户端", request["required_environment"])
+
+    def test_formula_rerecognition_is_handed_to_local_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            store.update_settings({"localSecurityToken": "secret-token", "localClientPlatform": "Windows"})
+            processor = TaskProcessor(store)
+            processor.record_local_client_heartbeat(
+                {
+                    "client_id": "desktop-formula",
+                    "status": "online",
+                    "platform": "Windows",
+                    "preflight": {
+                        "platform": "Windows",
+                        "components": {
+                            "omml_dependency": {"label": "OMML 依赖文件", "available": True, "status": "available"},
+                            "mathtype": {"label": "MathType 组件", "available": True, "status": "available"},
+                        },
+                        "capabilities": {"ommlDependencySearch": True, "mathTypeAutomation": True},
+                    },
+                }
+            )
+            word = processor.create_file({"file_name": "lesson.docx", "file_size": 2048})
+            task = store.save_task(Task(task_type="formula_precheck", execute_mode="local", file_ids=[word["id"]]).to_dict())
+            report = store.save_report(
+                {
+                    "id": "report_formula_local_retry",
+                    "task_id": task["id"],
+                    "report_type": "公式报告",
+                    "created_at": "2026-06-24T00:00:00+00:00",
+                    "files": [word],
+                    "analysis": {"formulas": [{"id": "formula_latex_retry", "file_id": word["id"], "source_type": "LaTeX", "position": "第 1 段", "latex": "a=b", "confidence": 90}]},
+                }
+            )
+            annotation = processor.save_formula_annotation({"report_id": report["id"], "formula_id": "formula_latex_retry", "status": "重新识别"})
+
+            payload = processor.local_task_payload(task["id"])
+            omml_action = next(action for action in payload["local_actions"] if action["type"] == "omml_mathtype")
+            plan_action = next(action for action in payload["desktop_execution_plan"]["actions"] if action["type"] == "omml_mathtype")
+            operations = [step["operation"] for step in plan_action["steps"]]
+            summary = summarize_payload(payload)
+            execution = build_dry_run_execution_summary(payload)
+            native_request = build_native_execution_request(payload, platform_name="Windows", allow_native_execution=True)
+
+            self.assertEqual(omml_action["status"], "recognition_queued")
+            self.assertEqual(omml_action["recognition_requests"][0]["annotation_id"], annotation["id"])
+            self.assertEqual(omml_action["recognition_requests"][0]["engine"], "local-client")
+            self.assertEqual(plan_action["recognition_request_count"], 1)
+            self.assertIn("formula.rerecognize_local", operations)
+            self.assertEqual(summary["actions"][0]["recognition_request_count"], 1)
+            self.assertEqual(summary["desktop_execution_plan"]["actions"][0]["recognition_request_count"], 1)
+            self.assertEqual(execution["actions"][0]["recognition_request_count"], 1)
+            self.assertEqual(native_request["actions"][0]["recognition_request_count"], 1)
+
+    def test_pdf_formula_rerecognition_request_is_exposed_in_pdf_formula_action(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            store.update_settings({"allowExternalMathpixUpload": False, "localSecurityToken": "secret-token"})
+            processor = TaskProcessor(store)
+            pdf = processor.create_file({"file_name": "scan.pdf", "file_size": 4096})
+            task = store.save_task(Task(task_type="pdf_to_word", execute_mode="hybrid", file_ids=[pdf["id"]]).to_dict())
+            report = store.save_report(
+                {
+                    "id": "report_pdf_formula_retry",
+                    "task_id": task["id"],
+                    "report_type": "PDF 公式报告",
+                    "created_at": "2026-06-24T00:00:00+00:00",
+                    "files": [pdf],
+                    "analysis": {"formulas": [{"id": "formula_pdf_retry", "file_id": pdf["id"], "source_type": "PDF", "position": "第 1 页", "latex": "x+y", "confidence": 62}]},
+                }
+            )
+            annotation = processor.save_formula_annotation({"report_id": report["id"], "formula_id": "formula_pdf_retry", "status": "重新识别"})
+
+            payload = processor.local_task_payload(task["id"])
+            pdf_action = next(action for action in payload["local_actions"] if action["type"] == "pdf_formula_mathtype")
+            plan_action = next(action for action in payload["desktop_execution_plan"]["actions"] if action["type"] == "pdf_formula_mathtype")
+            operations = [step["operation"] for step in plan_action["steps"]]
+            summary = summarize_payload(payload)
+
+            self.assertEqual(pdf_action["recognition_requests"][0]["annotation_id"], annotation["id"])
+            self.assertEqual(pdf_action["recognition_requests"][0]["engine"], "Mathpix")
+            self.assertFalse(pdf_action["recognition_requests"][0]["external_upload_performed"])
+            self.assertIn("external_mathpix_upload_not_authorized", pdf_action["recognition_requests"][0]["blocking_reasons"])
+            self.assertEqual(plan_action["recognition_request_count"], 1)
+            self.assertIn("mathpix.rerecognize_formula", operations)
+            self.assertEqual(summary["actions"][0]["recognition_request_count"], 1)
+            self.assertEqual(summary["desktop_execution_plan"]["actions"][0]["recognition_request_count"], 1)
+
+    def test_formula_annotation_rejects_unsupported_status(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            processor = TaskProcessor(store)
+            word = processor.create_uploaded_file("formula.docx", make_docx_bytes())[0]
+            processor.create_task({"task_type": "formula_precheck", "file_ids": [word["id"]]})
+            report = store.list_reports()[0]
+            formula = report["analysis"]["formulas"][0]
+            with self.assertRaises(ValueError):
+                processor.save_formula_annotation({"report_id": report["id"], "formula_id": formula["id"], "status": "自动执行外部识别"})
+
     def test_formula_zip_exports_json_tex_mml_and_manifest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = AppStore(tmp)
@@ -3685,10 +4450,22 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertIn(".acceptance-card", styles)
         self.assertIn('id="acceptanceMatrixPanel"', html)
         self.assertIn('id="acceptanceMatrixScope"', html)
+        self.assertIn('id="acceptanceRiskPanel"', html)
         self.assertIn("验收证据矩阵", html)
         self.assertIn("/api/acceptance-matrix", app_js)
         self.assertIn("acceptanceMatrix", app_js)
+        self.assertIn('status: "交接覆盖"', app_js)
+        self.assertIn('status: "需本地客户端实测"', app_js)
+        self.assertNotIn('status: "本地实测"', app_js)
+        self.assertIn("真实 OMML 转 MathType 需本地客户端实测", app_js)
+        self.assertIn("真实宏执行需本地客户端实测", app_js)
+        self.assertIn("uncovered_risks", app_js)
+        self.assertIn("blocking_reasons", app_js)
+        self.assertIn("required_environment", app_js)
+        self.assertIn("条未覆盖风险", app_js)
         self.assertIn("function renderAcceptanceMatrix()", app_js)
+        self.assertIn(".acceptance-risk-grid", styles)
+        self.assertIn(".acceptance-risk-card", styles)
         self.assertIn(".acceptance-matrix-grid", styles)
         self.assertIn(".acceptance-item-row", styles)
         self.assertIn('id="versionRoadmapPanel"', html)
@@ -3722,6 +4499,7 @@ class TaskProcessorTests(unittest.TestCase):
             "FileItem",
             "Task",
             "FormulaItem",
+            "FormulaAnnotation",
             "OmmlDependencyItem",
             "MacroItem",
             "SmallImageItem",
@@ -3826,13 +4604,34 @@ class TaskProcessorTests(unittest.TestCase):
             "公式交付合同",
             "install-plan-card",
             "install-contract-card",
+            "installer-manifest-card",
             "install-package-grid",
             "install-warning-list",
             "install-readiness-list",
             "install-step-list",
             "formula_compatibility",
+            "platform?.installer",
+            "k12.localInstallerManifest.v1",
+            "download_requires_platform_query",
+            "checksum_required",
+            "path_policy",
+            "install-boundary-grid",
+            "同平台要求",
+            "原生交接",
+            "阻断原因",
+            "安装包边界",
+            "recommended_action",
+            "same_platform_required_for_native_objects",
+            "native_handoff_allowed",
+            "native_handoff_blocking_reasons",
+            "package_boundary",
         ]:
             self.assertIn(install_label, app_js + styles)
+        self.assertIn("function installContractBadgeClass", app_js)
+        self.assertIn("// Platform mismatch must stay visible because MathType native objects are not portable.", app_js)
+        self.assertIn('blockers.includes("platform_mismatch")', app_js)
+        self.assertIn("installContractBadgeClass(formulaContract)", app_js)
+        self.assertNotIn('formulaContract.native_mathtype_object_allowed ? "warn" : "good"', app_js)
         self.assertIn("/api/local-client/manifest", app_js)
         self.assertIn("/api/local-client/heartbeat", app_js)
         for local_client_label in [
@@ -3896,6 +4695,7 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertIn(".image-detail-meta", styles)
         self.assertIn(".format-support-strip", styles)
         self.assertIn(".recent-task-list", styles)
+        self.assertIn(".progress-panel .recent-task-list", styles)
         self.assertIn(".home-quick-grid", styles)
         self.assertIn(".preview-helper", styles)
         self.assertIn("function previewMarkerChips", app_js)
@@ -3920,6 +4720,8 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertIn("/api/mathpix-jobs", app_js)
         self.assertIn("Mathpix 作业队列", html)
         self.assertIn("function renderPdfMathpixJobs()", app_js)
+        self.assertRegex(app_js, r'pdf_to_word:\s*\{[^}]*mode:\s*"hybrid"')
+        self.assertIn("Mathpix 识别 PDF，公式 OCR 后进入本地 MathType 后处理", app_js)
         self.assertIn("function mathpixJobBadge", app_js)
         self.assertIn("recognition_plan", app_js)
         self.assertIn("upload_gate", app_js)
@@ -3937,6 +4739,7 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertIn("function selectWordFiles()", app_js)
         self.assertIn("function previewSelectedWord()", app_js)
         self.assertIn("function startWordToPpt()", app_js)
+        self.assertIn('id="pdfToWordEngine" disabled title="固定使用 Mathpix"', html)
         self.assertIn("word-select", app_js)
         self.assertIn(".word-workspace-grid", styles)
         self.assertIn("function renderPptWorkspace()", app_js)
@@ -3948,15 +4751,32 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertIn("application/x-k12-planner-task", app_js)
         self.assertIn("planner-drag-handle", app_js)
         self.assertIn('button type="button" class="planner-drag-handle" draggable="true"', app_js)
+        self.assertIn("拖拽或用方向键调整流程顺序", app_js)
         self.assertIn('lineIcon("drag-lines", "drag-line-icon")', app_js)
         self.assertIn('"drag-lines": \'<path d="M7 7h10"></path><path d="M7 12h10"></path><path d="M7 17h10"></path>\'', app_js)
         self.assertIn('event.target.closest(".planner-drag-handle")', app_js)
         self.assertIn("item.getBoundingClientRect()", app_js)
         self.assertIn('placement === "after"', app_js)
-        self.assertIn("planner-icon-button planner-up", app_js)
+        self.assertIn("planner-enabled-check", app_js)
+        self.assertIn("已加入处理流程", app_js)
+        self.assertIn('lineIcon("check", "planner-check-icon")', app_js)
+        self.assertIn("function startPlannerPointerDrag", app_js)
+        self.assertIn("function updatePlannerPointerDrag", app_js)
+        self.assertIn("function finishPlannerPointerDrag", app_js)
+        self.assertIn("function handlePlannerHandleKeydown", app_js)
+        self.assertIn("event.target instanceof Element", app_js)
+        self.assertIn('event.key === "ArrowUp"', app_js)
+        self.assertIn('event.key === "ArrowDown"', app_js)
+        self.assertIn('event.key === "Home"', app_js)
+        self.assertIn('event.key === "End"', app_js)
+        self.assertIn("function movePlannerTaskToIndex", app_js)
+        self.assertIn("function focusPlannerHandle", app_js)
+        self.assertIn("Re-render replaces buttons", app_js)
+        self.assertIn("plannerDropPlacement", app_js)
         self.assertIn("function lineIcon", app_js)
         self.assertIn(".line-icon", styles)
         self.assertIn(".planner-drag-handle .drag-line-icon", styles)
+        self.assertIn(".planner-enabled-check", styles)
         self.assertIn(".planner-drag-handle:hover", styles)
         self.assertIn(".planner-drag-handle:focus-visible", styles)
         self.assertIn("macro-order-item", app_js)
@@ -4006,6 +4826,15 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertIn("task-log", app_js)
         self.assertIn("/api/logs?task_id=", app_js)
         self.assertIn("task_id=${encodeURIComponent(state.activeLogTaskId)}", app_js)
+        self.assertIn("structured-log-item", app_js)
+        self.assertIn("log-line-time", app_js)
+        self.assertIn("log-level-chip", app_js)
+        self.assertIn("function logLevelClass", app_js)
+        self.assertIn("function logLevelLabel", app_js)
+        self.assertIn(".log-level-chip.info", styles)
+        self.assertIn(".log-level-chip.warning", styles)
+        self.assertIn(".log-level-chip.error", styles)
+        self.assertIn(".log-level-chip.success", styles)
         self.assertIn("macro-rerun", app_js)
         self.assertIn("function rerunMacroFromReport", app_js)
         self.assertIn("function loadMacroSequenceFromLatestReport()", app_js)
@@ -4548,6 +5377,17 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertTrue(any("不要把 macOS MathType 对象直接交给 Windows" in step["detail"] for step in macos["steps"]))
 
             windows_package = store.installers_dir / "K12-Local-Client-Windows-x64.msi"
+            windows_package.write_bytes(b"")
+            invalid_windows_plan = processor.install_plan("Windows")
+            self.assertEqual(invalid_windows_plan["package"]["status"], "安装包无效")
+            self.assertEqual(invalid_windows_plan["package"]["download_url"], "")
+            self.assertEqual(invalid_windows_plan["package"]["size"], 0)
+            self.assertEqual(invalid_windows_plan["package"]["sha256"], "")
+            self.assertEqual(invalid_windows_plan["package"]["expected_location"], "本地路径已隐藏/K12-Local-Client-Windows-x64.msi")
+            self.assertTrue(invalid_windows_plan["package"]["expected_location_available"])
+            self.assertIn("/api/installers/{file_name}?platform=...", invalid_windows_plan["package"]["path_policy"])
+            self.assertNotIn(tmp, json.dumps(invalid_windows_plan, ensure_ascii=False))
+
             windows_package.write_bytes(b"k12 windows installer")
             macos_package = store.installers_dir / "K12-Local-Client-macOS-universal.pkg"
             macos_package.write_bytes(b"k12 mac installer")
@@ -4556,6 +5396,10 @@ class TaskProcessorTests(unittest.TestCase):
             macos_plan = processor.install_plan("macOS")
             self.assertIn("?platform=Windows", windows_plan["package"]["download_url"])
             self.assertIn("?platform=macOS", macos_plan["package"]["download_url"])
+            self.assertEqual(windows_plan["package"]["expected_location"], "本地路径已隐藏/K12-Local-Client-Windows-x64.msi")
+            self.assertEqual(macos_plan["package"]["expected_location"], "本地路径已隐藏/K12-Local-Client-macOS-universal.pkg")
+            self.assertNotIn(tmp, json.dumps(windows_plan, ensure_ascii=False))
+            self.assertNotIn(tmp, json.dumps(macos_plan, ensure_ascii=False))
 
     def test_install_plan_compares_target_platform_with_client_heartbeat(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -4594,6 +5438,11 @@ class TaskProcessorTests(unittest.TestCase):
                 processor.installer_download_info("K12-Local-Client-Windows-x64.msi")
 
             installer = store.installers_dir / "K12-Local-Client-Windows-x64.msi"
+            installer.write_bytes(b"")
+            with self.assertRaises(ValueError) as empty_installer:
+                processor.installer_download_info(installer.name)
+            self.assertIn("empty", str(empty_installer.exception))
+
             installer.write_bytes(b"k12 installer placeholder")
             info = processor.installer_download_info(installer.name)
             self.assertEqual(info["file_name"], installer.name)
@@ -4601,6 +5450,11 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(info["installer_kind"], "windows-msi")
             self.assertIn(".msi", info["package_boundary"])
             self.assertIn(".pkg", info["package_boundary"])
+            self.assertIn("MathType 原生对象", info["package_boundary"])
+            self.assertIn("不跨平台兼容", info["formula_object_boundary"])
+            self.assertEqual(info["formula_object_boundary_header"], "mathtype-native-objects-require-same-platform")
+            self.assertEqual(info["fallback_formats"], ["MathML", "LaTeX", "图片"])
+            self.assertEqual(info["fallback_formats_header"], "MathML,LaTeX,image")
             self.assertEqual(info["file_size"], len(b"k12 installer placeholder"))
             self.assertEqual(len(info["sha256"]), 64)
             self.assertEqual(info["package_boundary_header"], "windows-msi-and-macos-pkg-are-not-cross-platform")
@@ -4641,8 +5495,12 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(headers["X-K12-Platform"], "Windows")
             self.assertEqual(headers["X-K12-Installer-Kind"], "windows-msi")
             self.assertEqual(headers["X-K12-Package-Boundary"], "windows-msi-and-macos-pkg-are-not-cross-platform")
+            self.assertEqual(headers["X-K12-Formula-Object-Boundary"], "mathtype-native-objects-require-same-platform")
+            self.assertEqual(headers["X-K12-Formula-Fallback-Formats"], "MathML,LaTeX,image")
             self.assertEqual(len(headers["X-K12-SHA256"]), 64)
             self.assertIn(".msi", headers["Content-Disposition"])
+            for key, value in handler.output_headers:
+                f"{key}: {value}\r\n".encode("latin-1")
 
             handler = make_handler(store, processor)
             K12RequestHandler._send_installer(handler, mac_installer.name, {"platform": ["macOS"]})
@@ -4652,7 +5510,11 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(mac_headers["X-K12-Platform"], "macOS")
             self.assertEqual(mac_headers["X-K12-Installer-Kind"], "macos-pkg")
             self.assertEqual(mac_headers["X-K12-Package-Boundary"], "windows-msi-and-macos-pkg-are-not-cross-platform")
+            self.assertEqual(mac_headers["X-K12-Formula-Object-Boundary"], "mathtype-native-objects-require-same-platform")
+            self.assertEqual(mac_headers["X-K12-Formula-Fallback-Formats"], "MathML,LaTeX,image")
             self.assertIn(".pkg", mac_headers["Content-Disposition"])
+            for key, value in handler.output_headers:
+                f"{key}: {value}\r\n".encode("latin-1")
 
             handler = make_handler(store, processor)
             with self.assertRaises(JsonError) as raised:
@@ -4841,6 +5703,7 @@ class TaskProcessorTests(unittest.TestCase):
                     "task_type": "macro_sequence",
                     "file_ids": [word["id"]],
                     "options": {
+                        "workflowOrder": ["pdf_to_word", "macro_sequence", "small_image_scan"],
                         "selectedMacros": [{"id": "macro_clean_empty_paragraphs", "execute_order": 1}],
                         "confirmMacroRisk": True,
                         "macroBackup": True,
@@ -4857,6 +5720,11 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(payload["client_readiness"]["status"], "needs_heartbeat")
             self.assertIn("macroExecution", payload["client_readiness"]["missing_capabilities"])
             self.assertEqual(payload["task"]["execute_mode"], "local")
+            self.assertEqual(payload["workflow_plan"]["schema_version"], "k12.workflowPlan.v1")
+            self.assertEqual(payload["workflow_plan"]["current_task"], "macro_sequence")
+            self.assertEqual(payload["workflow_plan"]["current_index"], 2)
+            self.assertEqual(payload["workflow_plan"]["order"], ["pdf_to_word", "macro_sequence", "small_image_scan"])
+            self.assertEqual(payload["workflow_plan"]["labels"], ["PDF 转 Word", "Word 宏顺序执行", "微小图片检索"])
             self.assertEqual(payload["files"][0]["input_path"], word["storage_path"])
             self.assertTrue(payload["files"][0]["input_path_exists"])
             self.assertTrue(payload["sync"]["result_upload_allowed"])
@@ -4886,6 +5754,11 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(handler.status, 200)
             self.assertEqual(response["localPayload"]["task"]["id"], task["id"])
             self.assertEqual(response["localPayload"]["files"][0]["input_path"], word["storage_path"])
+            self.assertEqual(response["localPayload"]["workflow_plan"]["current_index"], 2)
+
+            readiness = processor.local_task_readiness(task["id"])
+            self.assertEqual(readiness["workflow_plan"]["order"], payload["workflow_plan"]["order"])
+            self.assertEqual(readiness["path_policy"], "no local file paths or tokens are returned")
 
     def test_local_task_payload_includes_platform_formula_delivery_contract(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5506,6 +6379,13 @@ class TaskProcessorTests(unittest.TestCase):
         payload = {
             "task": {"id": "task_1", "task_type": "macro_sequence", "task_label": "Word 宏顺序执行", "execute_mode": "local", "status": "待处理", "progress": 0},
             "handoff": {"requires_local_client": True, "status": "ready", "message": "本地客户端可接收任务参数"},
+            "workflow_plan": {
+                "schema_version": "k12.workflowPlan.v1",
+                "current_task": "macro_sequence",
+                "current_index": 2,
+                "order": ["pdf_to_word", "macro_sequence"],
+                "labels": ["PDF 转 Word", "Word 宏顺序执行"],
+            },
             "files": [
                 {
                     "id": "file_1",
@@ -5550,6 +6430,8 @@ class TaskProcessorTests(unittest.TestCase):
         summary_json = json.dumps(summary, ensure_ascii=False)
         self.assertEqual(summary["schema_version"], "k12.localClientDryRunSummary.v1")
         self.assertEqual(summary["file_count"], 1)
+        self.assertEqual(summary["workflow_plan"]["current_index"], 2)
+        self.assertEqual(summary["workflow_plan"]["order"], ["pdf_to_word", "macro_sequence"])
         self.assertEqual(summary["actions"][0]["macro_count"], 1)
         self.assertEqual(summary["desktop_execution_plan"]["schema_version"], "k12.desktopExecutionPlan.v1")
         self.assertEqual(summary["desktop_execution_plan"]["actions"][0]["step_count"], 2)
@@ -5601,6 +6483,118 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertNotIn("/Users/a1/private", native_json)
         self.assertNotIn("private-backup", native_json)
 
+    def test_local_client_contract_helpers_are_documented_without_divider_comments(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        local_client_path = Path(local_client_module.__file__)
+        tree = ast.parse(local_client_path.read_text(encoding="utf-8"))
+        docstrings = {
+            node.name: ast.get_docstring(node)
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef)
+        }
+        for name in [
+            "_component_available",
+            "_component_candidates",
+            "_dry_run_action_summary",
+            "_native_action_request",
+            "_native_action_blockers",
+            "_native_runner_profile",
+            "_action_requires_native_document_runner",
+            "_file_action_blocked_status",
+        ]:
+            self.assertTrue(docstrings.get(name), name)
+
+        divider_comment = re.compile(r"#\s*(?:-{3,}|={3,}|\u2014{2,})")
+        scan_paths = list((root / "k12").glob("*.py")) + [
+            root / "static" / "app.js",
+            root / "static" / "styles.css",
+            root / "README.md",
+            root / "docs" / "architecture.md",
+        ]
+        for path in scan_paths:
+            text = path.read_text(encoding="utf-8")
+            self.assertIsNone(divider_comment.search(text), str(path))
+
+    def test_mathpix_task_option_audit_is_documented(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        for path in [root / "README.md", root / "docs" / "architecture.md"]:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("task_option_audit", text)
+            self.assertIn("k12.mathpixTaskOptionAudit.v1", text)
+            self.assertIn("allowExternalMathpixUpload", text)
+            self.assertIn("externalUploadAuthorized", text)
+            self.assertIn("settings.allowExternalMathpixUpload", text)
+
+    def test_local_installer_manifest_is_documented(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        for path in [root / "README.md", root / "docs" / "architecture.md"]:
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("platform.installer", text)
+            self.assertIn("k12.localInstallerManifest.v1", text)
+            self.assertIn("/api/installers/{file_name}?platform=", text)
+            self.assertIn("SHA256", text)
+            self.assertIn("MathType 原生对象边界", text)
+            self.assertIn("不暴露 `installers/` 本地目录", text)
+
+    def test_local_companion_dry_run_blocks_cross_platform_formula_contract(self) -> None:
+        payload = {
+            "task": {"id": "task_formula", "task_type": "omml_to_mathtype", "task_label": "OMML 转 MathType"},
+            "desktop_execution_plan": {
+                "schema_version": "k12.desktopExecutionPlan.v1",
+                "status": "ready_for_native_client",
+                "native_execution_allowed": True,
+                "web_executes_native_documents": False,
+                "current_companion_cli_executes_native_documents": False,
+                "native_action_count": 1,
+                "platform": {"expected": "Windows", "actual": "Windows", "compatible": True},
+                "formula_delivery": {
+                    "schema_version": "k12.formulaDeliveryContract.v1",
+                    "platform": "macOS",
+                    "compatibility_mode": "platform-specific",
+                    "platform_object_format": "macOS MathType 对象",
+                    "platform_objects_cross_compatible": True,
+                    "native_mathtype_object_allowed": True,
+                    "native_object_requires_same_platform": False,
+                    "fallback_formats": ["MathML", "LaTeX", "图片"],
+                    "output_priority": ["macOS MathType 对象"],
+                    "message": "macOS 与 Windows 的 MathType 对象不通用",
+                },
+                "actions": [
+                    {
+                        "action_id": "task_formula:omml_mathtype",
+                        "type": "omml_mathtype",
+                        "label": "OMML/MathType 处理",
+                        "gate_status": "ready",
+                        "required_capabilities": [{"key": "mathTypeAutomation", "label": "MathType 自动化", "available": True}],
+                        "input_paths": ["C:/private/lesson.docx"],
+                        "steps": [{"operation": "mathtype.convert", "required": True}],
+                    }
+                ],
+            },
+            "sync": {"task_status_cloud_sync_allowed": True, "result_upload_allowed": False},
+        }
+
+        summary = summarize_payload(payload)
+        execution = build_dry_run_execution_summary(payload)
+        sync = build_dry_run_sync_payload(payload)
+        execution_json = json.dumps(execution, ensure_ascii=False)
+
+        self.assertEqual(summary["desktop_execution_plan"]["formula_delivery"]["platform"], "macOS")
+        self.assertFalse(summary["desktop_execution_plan"]["formula_delivery"]["platform_objects_cross_compatible"])
+        self.assertTrue(summary["desktop_execution_plan"]["formula_delivery"]["native_object_requires_same_platform"])
+        self.assertTrue(summary["desktop_execution_plan"]["actions"][0]["formula_delivery"]["required"])
+        self.assertEqual(execution["ready_action_count"], 0)
+        self.assertEqual(execution["blocked_action_count"], 1)
+        self.assertEqual(execution["formula_delivery"]["platform"], "macOS")
+        self.assertFalse(execution["formula_delivery"]["platform_objects_cross_compatible"])
+        self.assertTrue(execution["formula_delivery"]["native_object_requires_same_platform"])
+        self.assertEqual(execution["actions"][0]["dry_run_status"], "blocked_by_platform")
+        self.assertTrue(execution["actions"][0]["formula_delivery"]["required"])
+        self.assertIn("formula_delivery_platform_mismatch", execution["actions"][0]["blockers"])
+        self.assertIn("formula_contract_expected_platform_mismatch", execution["actions"][0]["blockers"])
+        self.assertIn("0/1 个动作可交接", sync["message"])
+        self.assertNotIn("C:/private", execution_json)
+
     def test_local_native_execution_request_marks_ready_windows_actions_without_running_them(self) -> None:
         payload = {
             "task": {"id": "task_2", "task_type": "macro_sequence", "task_label": "Word 宏顺序执行"},
@@ -5650,6 +6644,8 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertFalse(native_request["companion_cli_executes_native_documents"])
         self.assertFalse(native_request["platform"]["mathtype_objects_cross_platform_compatible"])
         self.assertTrue(native_request["platform"]["same_platform_required_for_native_mathtype"])
+        self.assertEqual(native_request["platform"]["runner_profile"]["support_level"], "windows_office_com_adapter")
+        self.assertTrue(native_request["platform"]["runner_profile"]["native_document_runner_available"])
         self.assertIn("MathType 原生对象必须按同平台交接", native_request["platform"]["message"])
         self.assertEqual(native_request["formula_delivery"]["platform"], "Windows")
         self.assertFalse(native_request["formula_delivery"]["platform_objects_cross_compatible"])
@@ -5661,6 +6657,57 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertEqual(native_request["actions"][0]["operations"], ["macro.backup", "macro.run_ordered", "macro.write_report"])
         self.assertFalse(native_request["actions"][0]["native_execution_performed"])
         self.assertNotIn("C:/private", native_json)
+
+    def test_local_native_execution_request_marks_macos_formula_actions_as_limited_handoff(self) -> None:
+        payload = {
+            "task": {"id": "task_macos", "task_type": "omml_to_mathtype", "task_label": "OMML 转 MathType"},
+            "desktop_execution_plan": {
+                "schema_version": "k12.desktopExecutionPlan.v1",
+                "status": "ready_for_native_client",
+                "native_execution_allowed": True,
+                "platform": {"expected": "macOS", "actual": "macOS", "compatible": True},
+                "formula_delivery": {
+                    "schema_version": "k12.formulaDeliveryContract.v1",
+                    "platform": "macOS",
+                    "compatibility_mode": "platform-specific",
+                    "platform_object_format": "macOS MathType 对象 / MathML / LaTeX / 图片兜底",
+                    "platform_objects_cross_compatible": False,
+                    "native_mathtype_object_allowed": True,
+                    "native_object_requires_same_platform": True,
+                    "fallback_formats": ["MathML", "LaTeX", "图片"],
+                    "output_priority": ["macOS MathType 对象", "MathML", "LaTeX", "图片"],
+                },
+                "actions": [
+                    {
+                        "action_id": "task_macos:omml_mathtype",
+                        "type": "omml_mathtype",
+                        "label": "OMML/MathType 处理",
+                        "gate_status": "ready",
+                        "required_capabilities": [{"key": "mathTypeAutomation", "label": "MathType 自动化", "available": True}],
+                        "steps": [{"operation": "mathtype.convert"}],
+                    }
+                ],
+            },
+        }
+
+        native_request = build_native_execution_request(payload, platform_name="macOS", allow_native_execution=True)
+
+        self.assertTrue(native_request["platform"]["macos_native_runner"])
+        self.assertFalse(native_request["platform"]["windows_native_runner"])
+        self.assertEqual(native_request["platform"]["runner_profile"]["support_level"], "macos_limited_handoff")
+        self.assertFalse(native_request["platform"]["runner_profile"]["native_document_runner_available"])
+        self.assertIn("formula.export_fallbacks", native_request["platform"]["runner_profile"]["supported_operations"])
+        self.assertEqual(native_request["formula_delivery"]["platform"], "macOS")
+        self.assertFalse(native_request["formula_delivery"]["platform_objects_cross_compatible"])
+        self.assertTrue(native_request["formula_delivery"]["native_object_requires_same_platform"])
+        self.assertEqual(native_request["ready_action_count"], 0)
+        self.assertEqual(native_request["blocked_action_count"], 1)
+        action = native_request["actions"][0]
+        self.assertEqual(action["native_request_status"], "blocked_by_platform")
+        self.assertTrue(action["formula_delivery"]["required"])
+        self.assertIn("macos_native_runner_limited", action["blockers"])
+        self.assertNotIn("formula_delivery_platform_mismatch", action["blockers"])
+        self.assertFalse(action["native_execution_performed"])
 
     def test_local_native_execution_request_blocks_mismatched_formula_delivery_platform(self) -> None:
         payload = {
@@ -6121,12 +7168,38 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertTrue(endpoints[("GET", "/api/local-client/uploads/{upload_id}/manifest")]["sensitive"])
             self.assertIn(("GET", "/api/tasks/recovery-summary"), endpoints)
             self.assertFalse(endpoints[("GET", "/api/tasks/recovery-summary")]["sensitive"])
+            review_endpoints = {
+                ("GET", "/api/image-annotations"),
+                ("POST", "/api/image-annotations"),
+                ("DELETE", "/api/image-annotations/{annotation_id}"),
+                ("GET", "/api/formula-annotations"),
+                ("POST", "/api/formula-annotations"),
+                ("POST", "/api/formula-annotations/bulk-confirm"),
+                ("DELETE", "/api/formula-annotations/{annotation_id}"),
+                ("GET", "/api/omml-annotations"),
+                ("POST", "/api/omml-annotations"),
+                ("DELETE", "/api/omml-annotations/{annotation_id}"),
+                ("GET", "/api/layout-annotations"),
+                ("POST", "/api/layout-annotations"),
+                ("DELETE", "/api/layout-annotations/{annotation_id}"),
+            }
+            for endpoint in review_endpoints:
+                self.assertIn(endpoint, endpoints)
+                self.assertTrue(endpoints[endpoint]["sensitive"])
+            self.assertIn("置信度阈值", endpoints[("POST", "/api/formula-annotations/bulk-confirm")]["description"])
+            self.assertIn("手动依赖", endpoints[("GET", "/api/omml-annotations")]["description"])
             self.assertIn(("POST", "/api/image-annotations/replacement"), endpoints)
             self.assertTrue(endpoints[("POST", "/api/image-annotations/replacement")]["sensitive"])
             self.assertIn(("POST", "/api/image-assets/reexport"), endpoints)
             self.assertTrue(endpoints[("POST", "/api/image-assets/reexport")]["sensitive"])
             self.assertIn(("GET", "/api/assets/replacements/{file_name}"), endpoints)
             self.assertTrue(endpoints[("GET", "/api/assets/replacements/{file_name}")]["sensitive"])
+            self.assertIn(("GET", "/api/assets/images/{asset_path}"), endpoints)
+            self.assertTrue(endpoints[("GET", "/api/assets/images/{asset_path}")]["sensitive"])
+            self.assertIn("受控图片缓存目录", endpoints[("GET", "/api/assets/images/{asset_path}")]["description"])
+            self.assertIn(("GET", "/api/artifacts/{task_id}/{file_name}"), endpoints)
+            self.assertTrue(endpoints[("GET", "/api/artifacts/{task_id}/{file_name}")]["sensitive"])
+            self.assertIn("报告登记", endpoints[("GET", "/api/artifacts/{task_id}/{file_name}")]["description"])
             self.assertEqual(endpoints[("POST", "/api/uploads")]["permission"], "files.manage")
             self.assertEqual(endpoints[("POST", "/api/files")]["permission"], "files.manage")
             self.assertEqual(endpoints[("POST", "/api/files/{file_id}/replace")]["permission"], "files.manage")
@@ -6148,6 +7221,21 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(endpoints[("DELETE", "/api/macro-templates/{template_id}")]["permission"], "templates.manage")
             self.assertEqual(endpoints[("POST", "/api/authorizations")]["permission"], "authorizations.manage")
             self.assertEqual(endpoints[("DELETE", "/api/reports/{report_id}")]["permission"], "reports.manage")
+            report_export_endpoints = {
+                ("GET", "/api/reports/{report_id}/images.zip"),
+                ("GET", "/api/reports/{report_id}/images.xlsx"),
+                ("GET", "/api/reports/{report_id}/formulas.zip"),
+                ("GET", "/api/reports/{report_id}/formulas.xlsx"),
+                ("GET", "/api/reports/{report_id}/omml-failures.csv"),
+                ("GET", "/api/reports/{report_id}/macro-failures.csv"),
+            }
+            for endpoint in report_export_endpoints:
+                self.assertIn(endpoint, endpoints)
+                self.assertTrue(endpoints[endpoint]["sensitive"])
+            self.assertIn("manifest.csv", endpoints[("GET", "/api/reports/{report_id}/images.zip")]["description"])
+            self.assertIn("TEX", endpoints[("GET", "/api/reports/{report_id}/formulas.zip")]["description"])
+            self.assertIn("手动依赖", endpoints[("GET", "/api/reports/{report_id}/omml-failures.csv")]["description"])
+            self.assertIn("备份恢复", endpoints[("GET", "/api/reports/{report_id}/macro-failures.csv")]["description"])
             self.assertIn(("POST", "/api/local-client/uploads"), endpoints)
             self.assertEqual(endpoints[("POST", "/api/local-client/uploads")]["auth"], "configured-token + cloud-sync-authorization")
             self.assertTrue(endpoints[("POST", "/api/local-client/uploads")]["sensitive"])
@@ -6156,11 +7244,37 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertIn(("POST", "/api/tasks/{task_id}/local-launch"), endpoints)
             self.assertEqual(endpoints[("POST", "/api/tasks/{task_id}/local-launch")]["auth"], "configured-token + launch-authorization")
             self.assertIn(("GET", "/api/mathpix-jobs"), endpoints)
+            self.assertIn("不触发新的外部上传", endpoints[("GET", "/api/mathpix-jobs")]["description"])
             self.assertIn(("GET", "/api/acceptance-matrix"), endpoints)
+            self.assertIn("验证上下文", endpoints[("GET", "/api/acceptance-matrix")]["description"])
+            self.assertIn("未覆盖风险", endpoints[("GET", "/api/acceptance-matrix")]["description"])
+            self.assertIn("pdfToWordEngine 固定归一为 Mathpix", endpoints[("GET", "/api/settings")]["description"])
+            self.assertIn("PDF 转 Word 引擎固定 Mathpix", endpoints[("PUT", "/api/settings")]["description"])
+            self.assertIn("settings.allowExternalMathpixUpload", endpoints[("PUT", "/api/settings")]["description"])
             self.assertIn(("GET", "/api/install-profile"), endpoints)
             self.assertIn(("GET", "/api/install-plan"), endpoints)
+            self.assertIn("心跳平台匹配", endpoints[("GET", "/api/install-plan")]["description"])
+            self.assertIn("MathType 同平台", endpoints[("GET", "/api/install-plan")]["description"])
+            self.assertIn("platform_mismatch", endpoints[("GET", "/api/tasks/{task_id}/local-readiness")]["description"])
+            self.assertIn("同平台 MathType/Office", endpoints[("GET", "/api/tasks/{task_id}/local-readiness")]["description"])
             self.assertIn(("GET", "/api/installers/{file_name}"), endpoints)
-            self.assertIn("注册的 Windows .msi 或 macOS .pkg", endpoints[("GET", "/api/installers/{file_name}")]["description"])
+            installer_endpoint = endpoints[("GET", "/api/installers/{file_name}")]
+            self.assertIn("注册的 Windows .msi 或 macOS .pkg", installer_endpoint["description"])
+            self.assertIn("公式对象同平台边界", installer_endpoint["description"])
+            response_headers = {item["name"]: item for item in installer_endpoint["response_headers"]}
+            self.assertEqual(
+                set(response_headers),
+                {
+                    "X-K12-Platform",
+                    "X-K12-Installer-Kind",
+                    "X-K12-Package-Boundary",
+                    "X-K12-Formula-Object-Boundary",
+                    "X-K12-Formula-Fallback-Formats",
+                    "X-K12-SHA256",
+                },
+            )
+            self.assertIn("MathType 原生对象必须同平台交接", response_headers["X-K12-Formula-Object-Boundary"]["description"])
+            self.assertIn("MathML,LaTeX,image", response_headers["X-K12-Formula-Fallback-Formats"]["description"])
 
     def test_data_dictionary_exposes_prd10_models_and_counts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -6219,13 +7333,13 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(handler.status, 200)
             self.assertEqual(dictionary["schema_version"], "k12.dataDictionary.v1")
             self.assertEqual(dictionary["source"], "PRD 第 10 章数据结构设计")
-            self.assertEqual(dictionary["summary"]["objects"], 7)
+            self.assertEqual(dictionary["summary"]["objects"], 8)
             self.assertGreaterEqual(dictionary["summary"]["fields"], 90)
             self.assertIn("本地路径字段默认脱敏", dictionary["path_policy"])
             objects = {item["name"]: item for item in dictionary["objects"]}
             self.assertEqual(
                 list(objects),
-                ["FileItem", "Task", "FormulaItem", "OmmlDependencyItem", "MacroItem", "SmallImageItem", "ReportItem"],
+                ["FileItem", "Task", "FormulaItem", "FormulaAnnotation", "OmmlDependencyItem", "MacroItem", "SmallImageItem", "ReportItem"],
             )
             self.assertEqual(objects["FileItem"]["count"], 1)
             self.assertEqual(objects["Task"]["count"], 1)
@@ -6239,9 +7353,15 @@ class TaskProcessorTests(unittest.TestCase):
             file_fields = {field["name"]: field for field in objects["FileItem"]["fields"]}
             self.assertEqual(file_fields["source_relative_path"]["type"], "string")
             self.assertEqual(file_fields["file_path"]["type"], "string")
+            task_fields = {field["name"]: field for field in objects["Task"]["fields"]}
+            self.assertEqual(task_fields["options"]["type"], "object")
+            self.assertIn("workflowPlan", task_fields["options"]["description"])
             formula_fields = {field["name"]: field for field in objects["FormulaItem"]["fields"]}
             self.assertEqual(formula_fields["position_status"]["type"], "string")
             self.assertEqual(formula_fields["fallback_position"]["description"], "位置缺失时的异常位置记录")
+            formula_annotation_fields = {field["name"]: field for field in objects["FormulaAnnotation"]["fields"]}
+            self.assertEqual(formula_annotation_fields["recognition_request"]["type"], "object")
+            self.assertIn("k12.formulaRecognitionRequest.v1", formula_annotation_fields["recognition_request"]["description"])
             image_fields = {field["name"]: field for field in objects["SmallImageItem"]["fields"]}
             self.assertEqual(image_fields["duplicate_check_status"]["type"], "string")
             self.assertEqual(image_fields["duplicate_fallback"]["description"], "重复判断异常兜底")
@@ -6264,6 +7384,13 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(matrix["source"], "PRD 第 17 章验收标准")
             self.assertEqual(matrix["summary"]["groups"], 10)
             self.assertEqual(matrix["summary"]["items"], 96)
+            self.assertEqual(matrix["summary"]["uncovered_risks"], 4)
+            risks = {item["key"]: item for item in matrix["uncovered_risks"]}
+            self.assertEqual(set(risks), {"17.6.2", "17.6.5", "17.7.4", "17.10.7"})
+            self.assertIn("未覆盖风险", risks["17.6.2"]["uncovered_risk"])
+            self.assertIn("mathpix_credentials_required", risks["17.6.5"]["blocking_reasons"])
+            self.assertIn("native_desktop_runner_required", risks["17.10.7"]["blocking_reasons"])
+            self.assertIn("同平台 MathType 环境", risks["17.10.7"]["required_environment"])
             groups = {group["section"]: group for group in matrix["groups"]}
             word_items = {item["key"]: item for item in groups["17.2"]["items"]}
             self.assertEqual(word_items["17.2.2"]["status"], "已覆盖")
@@ -6295,6 +7422,8 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(pdf_items["17.6.2"]["status"], "需 Mathpix 实测")
             self.assertIn("扫描 PDF OCR 合同自检通过", pdf_items["17.6.2"]["evidence"])
             self.assertIn("未发起外部上传", pdf_items["17.6.2"]["current"])
+            self.assertEqual(pdf_items["17.6.2"]["verification"]["scope"], "external_mathpix")
+            self.assertIn("外部上传授权", pdf_items["17.6.2"]["verification"]["required_environment"])
             self.assertEqual(pdf_items["17.6.3"]["status"], "已覆盖")
             self.assertIn("PDF 图片保留自检通过", pdf_items["17.6.3"]["evidence"])
             self.assertIn("未发起外部 Mathpix 上传", pdf_items["17.6.3"]["current"])
@@ -6303,6 +7432,7 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(pdf_items["17.6.5"]["status"], "需 Mathpix 实测")
             self.assertIn("PDF 公式 OCR 合同自检通过", pdf_items["17.6.5"]["evidence"])
             self.assertIn("tex.zip", pdf_items["17.6.5"]["current"])
+            self.assertIn("external_ocr_result_not_verified", pdf_items["17.6.5"]["verification"]["blocking_reasons"])
             self.assertEqual(pdf_items["17.6.6"]["status"], "已覆盖")
             self.assertIn("PDF 公式 MathType 后处理自检通过", pdf_items["17.6.6"]["evidence"])
             self.assertIn("真实 MathType 对象写回仍需本地客户端", pdf_items["17.6.6"]["current"])
@@ -6343,6 +7473,7 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(mathtype_items["17.7.4"]["status"], "需 Mathpix 实测")
             self.assertIn("PDF 公式识别转 MathType 合同自检通过", mathtype_items["17.7.4"]["evidence"])
             self.assertIn("blocked_mathpix", mathtype_items["17.7.4"]["current"])
+            self.assertIn("OCR 轮询", mathtype_items["17.7.4"]["verification"]["uncovered_risk"])
             self.assertEqual(mathtype_items["17.7.7"]["status"], "已覆盖")
             self.assertIn("多个 Word 文件的公式共享全文格式化参数", mathtype_items["17.7.7"]["evidence"])
             self.assertEqual(mathtype_items["17.7.8"]["status"], "已覆盖")
@@ -6363,6 +7494,8 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertIn("目标目录写入权限已校验", hybrid_items["17.10.7"]["current"])
             self.assertIn("显式授权后复制 1 个 OMML 依赖", hybrid_items["17.10.7"]["current"])
             self.assertIn("不会执行 Office、MathType、OMML 写回或 Word 宏", hybrid_items["17.10.7"]["current"])
+            self.assertEqual(hybrid_items["17.10.7"]["verification"]["scope"], "native_desktop_client")
+            self.assertIn("native_writeback_not_verified", hybrid_items["17.10.7"]["verification"]["blocking_reasons"])
             self.assertEqual(hybrid_items["17.10.8"]["status"], "已覆盖")
             self.assertIn("本地结果上传自检通过", hybrid_items["17.10.8"]["evidence"])
             self.assertIn("content_transfer=included", hybrid_items["17.10.8"]["current"])
@@ -6423,6 +7556,8 @@ class TaskProcessorTests(unittest.TestCase):
                 "allowTaskStatusCloudSync": True,
             })
             processor = TaskProcessor(store)
+            windows_package = store.installers_dir / "K12-Local-Client-Windows-x64.msi"
+            windows_package.write_bytes(b"k12 windows installer")
             handler = make_handler(store, processor)
             K12RequestHandler._handle_api_get(handler, "/api/local-client/manifest", {})
             response = json.loads(handler.wfile.getvalue().decode("utf-8"))
@@ -6435,6 +7570,21 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertIn(".msi", manifest["platform"]["package_boundary"])
             self.assertIn(".pkg", manifest["platform"]["package_boundary"])
             self.assertIn("MathType", manifest["platform"]["package_boundary"])
+            installer = manifest["platform"]["installer"]
+            self.assertEqual(installer["schema_version"], "k12.localInstallerManifest.v1")
+            self.assertEqual(installer["platform"], "Windows")
+            self.assertEqual(installer["installer_kind"], "windows-msi")
+            self.assertEqual(installer["file_name"], "K12-Local-Client-Windows-x64.msi")
+            self.assertEqual(installer["status"], "可下载")
+            self.assertIn("?platform=Windows", installer["download_url"])
+            self.assertTrue(installer["download_requires_platform_query"])
+            self.assertEqual(installer["size"], len(b"k12 windows installer"))
+            self.assertTrue(installer["sha256"])
+            self.assertTrue(installer["checksum_required"])
+            self.assertTrue(installer["expected_location_available"])
+            self.assertIn("/api/installers/{file_name}", installer["path_policy"])
+            self.assertIn("MathType 原生对象", installer["formula_object_boundary"])
+            self.assertNotIn(tmp, json.dumps(installer, ensure_ascii=False))
             self.assertEqual(manifest["platform"]["formula_object_interop"]["schema_version"], "k12.formulaObjectInterop.v1")
             self.assertFalse(manifest["platform"]["formula_object_interop"]["platform_objects_cross_compatible"])
             self.assertIn("MathML", manifest["platform"]["formula_object_interop"]["fallback_formats"])
@@ -6533,6 +7683,83 @@ class LocalApiSecurityTests(unittest.TestCase):
             K12RequestHandler._ensure_authorized(handler, "/api/files", {"token": ["secret-token"]})
 
             K12RequestHandler._ensure_authorized(handler, "/api/health", {})
+
+    def test_sensitive_download_routes_require_local_token_when_configured(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            store.update_settings({"localSecurityToken": "secret-token"})
+            handler = SimpleNamespace(store=store, headers={})
+
+            for path in ("/api/assets/images/report/icon.png", "/api/artifacts/task_demo/output.docx"):
+                with self.assertRaises(JsonError) as raised:
+                    K12RequestHandler._ensure_authorized(handler, path, {})
+                self.assertEqual(raised.exception.status, 401)
+
+                handler.headers = {"X-K12-Token": "secret-token"}
+                K12RequestHandler._ensure_authorized(handler, path, {})
+                handler.headers = {}
+
+    def test_image_asset_download_stays_inside_managed_image_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            processor = TaskProcessor(store)
+            image = store.images_dir / "report_demo" / "icon.png"
+            image.parent.mkdir(parents=True, exist_ok=True)
+            image.write_bytes(make_png_bytes(12, 10))
+
+            handler = make_handler(store, processor)
+            K12RequestHandler._send_image_asset(handler, "images/report_demo/icon.png")
+
+            self.assertEqual(handler.status, 200)
+            self.assertEqual(dict(handler.output_headers)["Content-Type"], "image/png")
+            self.assertEqual(handler.wfile.getvalue(), image.read_bytes())
+
+            (store.data_dir / "secret.png").write_bytes(make_png_bytes(8, 8))
+            with self.assertRaises(JsonError) as raised:
+                K12RequestHandler._send_image_asset(make_handler(store, processor), "images/../secret.png")
+            self.assertEqual(raised.exception.status, 404)
+            self.assertEqual(raised.exception.message, "Image not found")
+
+    def test_artifact_download_only_serves_successful_report_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            processor = TaskProcessor(store)
+            task_id = "task_demo"
+            output_dir = store.output_task_dir(task_id)
+            registered = output_dir / "lesson.pptx"
+            registered.write_bytes(b"registered artifact")
+            unregistered = output_dir / "scratch.txt"
+            unregistered.write_text("not linked from report", encoding="utf-8")
+            failed = output_dir / "failed.docx"
+            failed.write_bytes(b"failed artifact")
+            store.save_report(
+                {
+                    "id": "report_demo",
+                    "task_id": task_id,
+                    "report_type": "处理报告",
+                    "created_at": "2026-06-24T00:00:00+00:00",
+                    "files": [],
+                    "analysis": {
+                        "artifacts": [
+                            {"task_id": task_id, "file_name": registered.name, "path": str(registered), "status": "成功"},
+                            {"task_id": task_id, "file_name": failed.name, "path": str(failed), "status": "失败"},
+                        ]
+                    },
+                }
+            )
+
+            handler = make_handler(store, processor)
+            K12RequestHandler._send_artifact(handler, f"/api/artifacts/{task_id}/{registered.name}")
+
+            self.assertEqual(handler.status, 200)
+            self.assertEqual(handler.wfile.getvalue(), b"registered artifact")
+            self.assertIn(("Content-Disposition", f'attachment; filename="{registered.name}"'), handler.output_headers)
+            with self.assertRaises(JsonError) as unregistered_error:
+                K12RequestHandler._send_artifact(make_handler(store, processor), f"/api/artifacts/{task_id}/{unregistered.name}")
+            self.assertEqual(unregistered_error.exception.status, 404)
+            with self.assertRaises(JsonError) as failed_error:
+                K12RequestHandler._send_artifact(make_handler(store, processor), f"/api/artifacts/{task_id}/{failed.name}")
+            self.assertEqual(failed_error.exception.status, 404)
 
 
 def make_handler(store: AppStore, processor: TaskProcessor):

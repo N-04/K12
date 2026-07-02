@@ -33,7 +33,7 @@ OMML_DEPENDENCY_SUFFIXES = {".xsl", ".xslt", ".xml", ".mml"}
 class LocalClientError(RuntimeError):
     """Raised when the companion CLI cannot complete a safe handoff step."""
 
-    pass
+    code = "local_client_error"
 
 
 def normalize_origin(origin: str) -> str:
@@ -140,10 +140,12 @@ def sanitize_component_preflight(preflight: dict[str, Any]) -> dict[str, Any]:
 
 
 def _component_status(available: bool, label: str) -> dict[str, Any]:
+    """Format one desktop component preflight result without path details."""
     return {"label": label, "available": bool(available), "status": "available" if available else "missing"}
 
 
 def _component_available(platform_name: str, component: str) -> bool:
+    """Check whether a desktop component appears available on this platform."""
     commands = {
         "word": ["winword", "Microsoft Word"],
         "powerpoint": ["powerpnt", "Microsoft PowerPoint"],
@@ -163,6 +165,7 @@ def _component_available(platform_name: str, component: str) -> bool:
 
 
 def _component_candidates(platform_name: str, component: str) -> list[Path]:
+    """Return conservative platform-specific component locations to probe."""
     env_omml = os.environ.get("K12_OMML_DEPENDENCY", "")
     mac_apps = {
         "word": ["/Applications/Microsoft Word.app"],
@@ -196,6 +199,7 @@ def summarize_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Summarize a local task payload without leaking local paths or tokens."""
     task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
     handoff = payload.get("handoff") if isinstance(payload.get("handoff"), dict) else {}
+    workflow_plan = payload.get("workflow_plan") if isinstance(payload.get("workflow_plan"), dict) else {}
     sync = payload.get("sync") if isinstance(payload.get("sync"), dict) else {}
     files = payload.get("files") if isinstance(payload.get("files"), list) else []
     actions = payload.get("local_actions") if isinstance(payload.get("local_actions"), list) else []
@@ -221,27 +225,46 @@ def summarize_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "macro_count": len(item.get("macros") or []) if isinstance(item.get("macros"), list) else 0,
             "dependency_count": len(item.get("dependencies") or []) if isinstance(item.get("dependencies"), list) else 0,
             "retry_request_count": len(item.get("retry_requests") or []) if isinstance(item.get("retry_requests"), list) else 0,
+            "recognition_request_count": len(item.get("recognition_requests") or []) if isinstance(item.get("recognition_requests"), list) else 0,
             "artifact_count": len(item.get("artifacts") or []) if isinstance(item.get("artifacts"), list) else 0,
         }
         for item in actions
         if isinstance(item, dict)
     ]
     plan_actions = execution_plan.get("actions") if isinstance(execution_plan.get("actions"), list) else []
-    safe_plan_actions = [
-        {
-            "type": str(item.get("type") or ""),
-            "label": str(item.get("label") or item.get("type") or ""),
-            "gate_status": str(item.get("gate_status") or ""),
-            "step_count": len(item.get("steps") or []) if isinstance(item.get("steps"), list) else 0,
-            "required_capabilities": [
-                str(capability.get("key") or "")
-                for capability in item.get("required_capabilities") or []
-                if isinstance(capability, dict) and capability.get("key")
-            ],
-        }
-        for item in plan_actions
-        if isinstance(item, dict)
-    ]
+    plan_platform = _safe_plan_platform(execution_plan.get("platform"))
+    formula_delivery = _safe_formula_delivery_contract(_raw_formula_delivery(payload, execution_plan), plan_platform["expected"])
+    safe_plan_actions = []
+    for item in plan_actions:
+        if not isinstance(item, dict):
+            continue
+        steps = item.get("steps") if isinstance(item.get("steps"), list) else []
+        operations = [
+            str(step.get("operation") or "")[:120]
+            for step in steps
+            if isinstance(step, dict) and step.get("operation")
+        ][:20]
+        required_capabilities = _safe_required_capabilities(item.get("required_capabilities"))
+        action_contract = _safe_formula_delivery_contract(
+            item.get("formula_delivery") if isinstance(item.get("formula_delivery"), dict) else formula_delivery,
+            plan_platform["expected"],
+        )
+        safe_plan_actions.append(
+            {
+                "type": str(item.get("type") or ""),
+                "label": str(item.get("label") or item.get("type") or ""),
+                "gate_status": str(item.get("gate_status") or ""),
+                "step_count": len(steps),
+                "recognition_request_count": int(item.get("recognition_request_count") or len(item.get("recognition_requests") or [])),
+                "required_capabilities": [capability["key"] for capability in required_capabilities],
+                "formula_delivery": _action_formula_delivery_summary(
+                    str(item.get("type") or ""),
+                    required_capabilities,
+                    operations,
+                    action_contract,
+                ),
+            }
+        )
     return {
         "schema_version": "k12.localClientDryRunSummary.v1",
         "task": {
@@ -257,6 +280,13 @@ def summarize_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "status": str(handoff.get("status") or ""),
             "message": str(handoff.get("message") or ""),
         },
+        "workflow_plan": {
+            "schema_version": str(workflow_plan.get("schema_version") or ""),
+            "current_task": str(workflow_plan.get("current_task") or ""),
+            "current_index": int(workflow_plan.get("current_index") or 0),
+            "order": [str(item) for item in workflow_plan.get("order") or []],
+            "labels": [str(item) for item in workflow_plan.get("labels") or []],
+        },
         "files": safe_files,
         "file_count": len(safe_files),
         "missing_input_count": sum(1 for item in files if isinstance(item, dict) and not item.get("input_path_exists")),
@@ -269,6 +299,8 @@ def summarize_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "web_executes_native_documents": bool(execution_plan.get("web_executes_native_documents")),
             "current_companion_cli_executes_native_documents": bool(execution_plan.get("current_companion_cli_executes_native_documents")),
             "native_action_count": int(execution_plan.get("native_action_count") or 0),
+            "platform": plan_platform,
+            "formula_delivery": formula_delivery,
             "actions": safe_plan_actions,
         },
         "sync": {
@@ -285,11 +317,17 @@ def summarize_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_dry_run_execution_summary(payload: dict[str, Any]) -> dict[str, Any]:
-    """Report desktop-plan readiness without executing native document actions."""
+    """Report desktop-plan readiness and same-platform formula delivery contract without executing native document actions."""
     task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
     execution_plan = payload.get("desktop_execution_plan") if isinstance(payload.get("desktop_execution_plan"), dict) else {}
     raw_actions = execution_plan.get("actions") if isinstance(execution_plan.get("actions"), list) else []
-    actions = [_dry_run_action_summary(action) for action in raw_actions if isinstance(action, dict)]
+    plan_platform = _safe_plan_platform(execution_plan.get("platform"))
+    formula_delivery = _safe_formula_delivery_contract(_raw_formula_delivery(payload, execution_plan), plan_platform["expected"])
+    actions = [
+        _dry_run_action_summary(action, formula_delivery, plan_platform["actual"], plan_platform["expected"])
+        for action in raw_actions
+        if isinstance(action, dict)
+    ]
     return {
         "schema_version": "k12.localDryRunExecution.v1",
         "task": {
@@ -304,21 +342,38 @@ def build_dry_run_execution_summary(payload: dict[str, Any]) -> dict[str, Any]:
         "ready_action_count": sum(1 for action in actions if action["dry_run_status"] == "ready_for_native_executor"),
         "blocked_action_count": sum(1 for action in actions if action["dry_run_status"].startswith("blocked")),
         "waiting_action_count": sum(1 for action in actions if action["dry_run_status"] == "waiting_for_heartbeat"),
+        "platform": plan_platform,
+        "formula_delivery": formula_delivery,
         "actions": actions,
         "guardrails": [
-            "dry-run 只校验桌面执行计划、能力门槛和输出合同",
+            "dry-run 只校验桌面执行计划、平台公式合同、能力门槛和输出合同",
             "不会执行 Office、MathType、OMML 写回或 Word 宏",
             "不回传 input_path、output_directory、backup_path 或安全令牌",
         ],
     }
 
 
-def _dry_run_action_summary(action: dict[str, Any]) -> dict[str, Any]:
+def _dry_run_action_summary(
+    action: dict[str, Any],
+    plan_formula_delivery: dict[str, Any],
+    detected_platform: str,
+    expected_platform: str,
+) -> dict[str, Any]:
+    """Summarize one desktop action for dry-run without exposing local paths."""
     gate_status = str(action.get("gate_status") or "")
     required_capabilities = _safe_required_capabilities(action.get("required_capabilities"))
-    blockers = _dry_run_blockers(gate_status, required_capabilities)
-    output_contract = action.get("output_contract") if isinstance(action.get("output_contract"), dict) else {}
     steps = action.get("steps") if isinstance(action.get("steps"), list) else []
+    operations = [
+        str(step.get("operation") or "")[:120]
+        for step in steps
+        if isinstance(step, dict) and step.get("operation")
+    ][:20]
+    formula_delivery = _safe_formula_delivery_contract(
+        action.get("formula_delivery") if isinstance(action.get("formula_delivery"), dict) else plan_formula_delivery,
+        expected_platform,
+    )
+    blockers = _dry_run_blockers(gate_status, required_capabilities, action, formula_delivery, detected_platform, expected_platform)
+    output_contract = action.get("output_contract") if isinstance(action.get("output_contract"), dict) else {}
     return {
         "action_id": str(action.get("action_id") or "")[:120],
         "type": str(action.get("type") or "")[:80],
@@ -330,13 +385,21 @@ def _dry_run_action_summary(action: dict[str, Any]) -> dict[str, Any]:
         "required_capabilities": required_capabilities,
         "step_count": len(steps),
         "required_step_count": sum(1 for step in steps if isinstance(step, dict) and bool(step.get("required"))),
+        "recognition_request_count": int(action.get("recognition_request_count") or len(action.get("recognition_requests") or [])),
         "output_artifact_types": [str(item)[:40] for item in output_contract.get("artifact_types") or [] if isinstance(item, str)],
         "result_upload_optional": bool(output_contract.get("result_upload_optional")),
+        "formula_delivery": _action_formula_delivery_summary(
+            str(action.get("type") or ""),
+            required_capabilities,
+            operations,
+            formula_delivery,
+        ),
         "blockers": blockers,
     }
 
 
 def _safe_required_capabilities(value: Any) -> list[dict[str, Any]]:
+    """Keep only known local-client capability gates from an action payload."""
     if not isinstance(value, list):
         return []
     capabilities: list[dict[str, Any]] = []
@@ -356,22 +419,44 @@ def _safe_required_capabilities(value: Any) -> list[dict[str, Any]]:
     return capabilities
 
 
-def _dry_run_blockers(gate_status: str, required_capabilities: list[dict[str, Any]]) -> list[str]:
-    if gate_status == "ready":
-        return []
+def _dry_run_blockers(
+    gate_status: str,
+    required_capabilities: list[dict[str, Any]],
+    action: dict[str, Any],
+    formula_delivery: dict[str, Any],
+    detected_platform: str,
+    expected_platform: str,
+) -> list[str]:
+    """Merge gate, capability, and formula-platform checks into redacted dry-run blockers."""
+    blockers: list[str] = []
     if gate_status == "waiting_for_heartbeat":
-        return ["local_client_heartbeat_required"]
-    if gate_status == "blocked_by_platform":
-        return ["platform_mismatch"]
-    if gate_status == "blocked_by_capability":
+        blockers.append("local_client_heartbeat_required")
+    elif gate_status == "blocked_by_platform":
+        blockers.append("platform_mismatch")
+    elif gate_status == "blocked_by_capability":
         missing = [item["key"] for item in required_capabilities if not item.get("available")]
-        return [f"missing_capability:{key}" for key in missing] or ["missing_capability"]
-    if gate_status:
-        return [gate_status]
-    return ["pending_preflight"]
+        blockers.extend([f"missing_capability:{key}" for key in missing] or ["missing_capability"])
+    elif gate_status:
+        blockers.append(gate_status)
+    else:
+        blockers.append("pending_preflight")
+    if _action_uses_mathtype_contract(action, required_capabilities):
+        blockers.extend(_formula_delivery_blockers(formula_delivery, detected_platform, expected_platform))
+    return list(dict.fromkeys(blockers))
 
 
 def _dry_run_status(gate_status: str, blockers: list[str]) -> str:
+    """Collapse gate and blocker details into one dry-run status value."""
+    platform_blockers = {
+        "formula_delivery_contract_missing",
+        "platform_mismatch",
+        "formula_delivery_platform_mismatch",
+        "formula_contract_expected_platform_mismatch",
+    }
+    if platform_blockers.intersection(blockers):
+        return "blocked_by_platform"
+    if any(item.startswith("missing_capability:") for item in blockers) or "missing_capability" in blockers:
+        return "blocked_by_capability"
     if gate_status == "ready":
         return "ready_for_native_executor"
     if gate_status == "waiting_for_heartbeat":
@@ -383,6 +468,34 @@ def _dry_run_status(gate_status: str, blockers: list[str]) -> str:
     if blockers:
         return "pending_preflight"
     return "pending_preflight"
+
+
+def _safe_plan_platform(value: Any) -> dict[str, Any]:
+    """Return a path-free platform summary from a desktop execution plan."""
+    raw = value if isinstance(value, dict) else {}
+    expected = normalize_platform(str(raw.get("expected") or ""))
+    actual = normalize_platform(str(raw.get("actual") or ""))
+    compatible_default = not (
+        expected in {"Windows", "macOS"}
+        and actual in {"Windows", "macOS"}
+        and expected != actual
+    )
+    return {
+        "expected": expected,
+        "actual": actual,
+        "compatible": bool(raw.get("compatible", compatible_default)),
+        "same_platform_required_for_native_mathtype": bool(raw.get("same_platform_required_for_native_mathtype")),
+        "message": str(raw.get("message") or "")[:240],
+    }
+
+
+def _raw_formula_delivery(payload: dict[str, Any], execution_plan: dict[str, Any]) -> dict[str, Any]:
+    """Prefer the desktop plan formula contract, then the payload contract."""
+    if isinstance(execution_plan.get("formula_delivery"), dict):
+        return execution_plan["formula_delivery"]
+    if isinstance(payload.get("formula_delivery"), dict):
+        return payload["formula_delivery"]
+    return {}
 
 
 def build_dry_run_sync_payload(payload: dict[str, Any], result_upload_requested: bool = False) -> dict[str, Any]:
@@ -428,6 +541,7 @@ def build_native_execution_request(payload: dict[str, Any], platform_name: str =
         )
     formula_delivery = _safe_formula_delivery_contract(raw_formula_delivery, expected_platform)
     same_platform_required = bool(formula_delivery.get("native_object_requires_same_platform")) or expected_platform in {"Windows", "macOS"}
+    runner_profile = _native_runner_profile(detected_platform)
     raw_actions = execution_plan.get("actions") if isinstance(execution_plan.get("actions"), list) else []
     action_requests = [
         _native_action_request(
@@ -437,6 +551,7 @@ def build_native_execution_request(payload: dict[str, Any], platform_name: str =
             bool(allow_native_execution),
             bool(execution_plan.get("native_execution_allowed")),
             formula_delivery,
+            runner_profile,
         )
         for action in raw_actions
         if isinstance(action, dict)
@@ -455,7 +570,8 @@ def build_native_execution_request(payload: dict[str, Any], platform_name: str =
             "expected": expected_platform,
             "compatible": bool(plan_platform.get("compatible", detected_platform == expected_platform or expected_platform == "auto")),
             "windows_native_runner": detected_platform == "Windows",
-            "macos_native_runner": False,
+            "macos_native_runner": detected_platform == "macOS",
+            "runner_profile": runner_profile,
             "mathtype_objects_cross_platform_compatible": False,
             "same_platform_required_for_native_mathtype": same_platform_required,
             "fallback_formula_formats": ["MathML", "LaTeX", "image"],
@@ -484,7 +600,9 @@ def _native_action_request(
     allow_native_execution: bool,
     plan_allows_native_execution: bool,
     formula_delivery: dict[str, Any],
+    runner_profile: dict[str, Any],
 ) -> dict[str, Any]:
+    """Build one future native-runner request while keeping execution disabled."""
     action_type = str(action.get("type") or "")[:80]
     required_capabilities = _safe_required_capabilities(action.get("required_capabilities"))
     steps = action.get("steps") if isinstance(action.get("steps"), list) else []
@@ -502,6 +620,7 @@ def _native_action_request(
         allow_native_execution,
         plan_allows_native_execution,
         formula_delivery,
+        runner_profile,
     )
     status = "ready_for_native_runner" if not blockers else _native_blocked_status(blockers)
     return {
@@ -512,6 +631,7 @@ def _native_action_request(
         "native_request_status": status,
         "required_capabilities": required_capabilities,
         "operation_count": len(operations),
+        "recognition_request_count": int(action.get("recognition_request_count") or len(action.get("recognition_requests") or [])),
         "operations": operations,
         "output_artifact_types": [
             str(item)[:40]
@@ -533,7 +653,9 @@ def _native_action_blockers(
     allow_native_execution: bool,
     plan_allows_native_execution: bool,
     formula_delivery: dict[str, Any],
+    runner_profile: dict[str, Any],
 ) -> list[str]:
+    """Collect why a native action request cannot be handed to a runner yet."""
     blockers: list[str] = []
     gate_status = str(action.get("gate_status") or "")
     if not allow_native_execution:
@@ -546,18 +668,27 @@ def _native_action_blockers(
         blockers.append("platform_mismatch")
     if _action_uses_mathtype_contract(action, required_capabilities):
         blockers.extend(_formula_delivery_blockers(formula_delivery, detected_platform, expected_platform))
-    if detected_platform != "Windows":
+    if detected_platform == "macOS" and _action_requires_native_document_runner(action):
+        blockers.append("macos_native_runner_limited")
+    elif detected_platform != "Windows" and _action_requires_native_document_runner(action):
+        blockers.append("native_runner_not_available_for_platform")
+    elif detected_platform not in {"Windows", "macOS"}:
+        blockers.append("native_runner_not_available_for_platform")
+    if action.get("type") == "open_output_directory" and "shell.open_output_directory" not in runner_profile.get("supported_operations", []):
         blockers.append("native_runner_not_available_for_platform")
     blockers.extend(f"missing_capability:{item['key']}" for item in required_capabilities if not item.get("available"))
     return list(dict.fromkeys(blockers))
 
 
 def _native_blocked_status(blockers: list[str]) -> str:
+    """Return the highest-level native request block category."""
     platform_blockers = {
         "formula_delivery_contract_missing",
         "platform_mismatch",
         "formula_delivery_platform_mismatch",
         "formula_contract_expected_platform_mismatch",
+        "macos_native_runner_limited",
+        "native_runner_not_available_for_platform",
     }
     if platform_blockers.intersection(blockers):
         return "blocked_by_platform"
@@ -570,9 +701,73 @@ def _native_blocked_status(blockers: list[str]) -> str:
     return "blocked_preflight"
 
 
+def _native_runner_profile(detected_platform: str) -> dict[str, Any]:
+    """Describe which future native adapter may consume the request contract."""
+    platform_name = normalize_platform(detected_platform)
+    if platform_name == "Windows":
+        return {
+            "schema_version": "k12.nativeRunnerProfile.v1",
+            "platform": "Windows",
+            "support_level": "windows_office_com_adapter",
+            "native_document_runner_available": True,
+            "office_automation_adapter": "pywin32 / Office COM",
+            "mathtype_adapter": "Windows MathType OLE / Equation Native",
+            "macro_adapter": "Word VBA / COM",
+            "supported_operations": [
+                "office.open_source",
+                "office.convert",
+                "mathtype.convert",
+                "macro.run_ordered",
+                "shell.open_output_directory",
+            ],
+            "guardrail": "仅同平台交付 Windows MathType 原生对象，跨平台必须附带 MathML、LaTeX 或图片兜底。",
+        }
+    if platform_name == "macOS":
+        return {
+            "schema_version": "k12.nativeRunnerProfile.v1",
+            "platform": "macOS",
+            "support_level": "macos_limited_handoff",
+            "native_document_runner_available": False,
+            "office_automation_adapter": "受限：不声明已接入 Office for Mac 自动化",
+            "mathtype_adapter": "受限：仅登记 macOS MathType 同平台合同和兜底格式",
+            "macro_adapter": "不可直接执行 Word 宏",
+            "supported_operations": [
+                "formula.export_fallbacks",
+                "manual_review",
+                "shell.open_output_directory",
+            ],
+            "guardrail": "macOS MathType 对象不能交给 Windows 链路；当前 CLI 只生成受限交接合同，不执行原生写回。",
+        }
+    return {
+        "schema_version": "k12.nativeRunnerProfile.v1",
+        "platform": platform_name or "Unknown",
+        "support_level": "unsupported_platform",
+        "native_document_runner_available": False,
+        "office_automation_adapter": "",
+        "mathtype_adapter": "未知平台仅允许 MathML、LaTeX 或图片兜底",
+        "macro_adapter": "",
+        "supported_operations": [],
+        "guardrail": "请先选择 Windows 或 macOS 安装画像，再生成平台专属执行请求。",
+    }
+
+
+def _action_requires_native_document_runner(action: dict[str, Any]) -> bool:
+    """Return True for actions that need Office, MathType, OMML, or macro APIs."""
+    action_type = str(action.get("type") or "")
+    if action_type in {"macro_sequence", "omml_mathtype", "pdf_formula_mathtype", "office_conversion"}:
+        return True
+    steps = action.get("steps") if isinstance(action.get("steps"), list) else []
+    operations = [str(step.get("operation") or "").lower() for step in steps if isinstance(step, dict)]
+    return any(
+        marker in operation
+        for operation in operations
+        for marker in ("office.", "mathtype.", "macro.", "omml.", "formula.merge_into_docx")
+    )
+
+
 def _safe_formula_delivery_contract(value: dict[str, Any], fallback_platform: str) -> dict[str, Any]:
     """Return a path-safe MathType delivery contract for native runners."""
-    contract_present = bool(value)
+    contract_present = bool(value.get("contract_present", bool(value)))
     platform_name = normalize_platform(str(value.get("platform") or fallback_platform or "Unknown"))
     fallback_formats = _safe_formula_format_list(value.get("fallback_formats"), ["MathML", "LaTeX", "图片"])
     output_priority = _safe_formula_format_list(value.get("output_priority"), fallback_formats)
@@ -767,6 +962,7 @@ def _execute_omml_dependency_copy(dependency: dict[str, Any], copy_strategy: str
 
 
 def _file_action_blocked_status(blockers: list[str]) -> str:
+    """Choose the user-facing status for a blocked safe file action."""
     if "file_actions_not_requested" in blockers:
         return "blocked_until_explicit_file_action_request"
     if "unsupported_dependency_extension" in blockers:
@@ -781,6 +977,7 @@ def _file_action_blocked_status(blockers: list[str]) -> str:
 
 
 def _sha256_file(path: Path) -> str:
+    """Hash a local file after an explicitly authorized safe file action."""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -789,6 +986,7 @@ def _sha256_file(path: Path) -> str:
 
 
 def _unique_local_target_path(path: Path) -> Path:
+    """Create a non-conflicting OMML dependency copy target path."""
     stem = path.stem
     suffix = path.suffix
     for index in range(1, 10_000):

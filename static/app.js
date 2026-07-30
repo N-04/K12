@@ -1515,11 +1515,15 @@ function renderTasks() {
 function taskResultSummary(task) {
   const success = toCount(task.success_count);
   const failed = toCount(task.fail_count);
+  const pending = toCount(task.pending_count);
+  const cancelled = toCount(task.cancelled_count);
   const failureRows = toCount(task.failure_count);
-  if (!success && !failed && !failureRows) return "";
+  if (!success && !failed && !pending && !cancelled && !failureRows) return "";
   const retryable = toCount(task.retryable_count);
+  const pendingHint = pending ? ` · 待本地 ${pending}` : "";
+  const cancelledHint = cancelled ? ` · 已取消 ${cancelled}` : "";
   const retryHint = retryable ? ` · 可重试 ${retryable}` : "";
-  return `<small class="table-note">成功 ${success} / 失败 ${failed}${retryHint}</small>`;
+  return `<small class="table-note">成功 ${success} / 失败 ${failed}${pendingHint}${cancelledHint}${retryHint}</small>`;
 }
 
 function taskFailureReason(task) {
@@ -1529,18 +1533,20 @@ function taskFailureReason(task) {
 }
 
 function taskActionButtons(task) {
-  const canPause = !["成功", "已取消", "已暂停", "已中断"].includes(task.status);
+  const canPause = ["待处理", "处理中"].includes(task.status);
   const canResume = ["已暂停", "已中断"].includes(task.status);
+  const canRetry = ["失败", "已取消", "已中断"].includes(task.status);
+  const canCancel = !["成功", "失败", "已取消"].includes(task.status);
   const canRestore = hasMacroBackup(task.id);
   return `<div class="row-actions">
     <button class="mini-button task-detail" data-id="${task.id}" title="查看任务详情">详情</button>
-    <button class="mini-button task-retry" data-id="${task.id}" ${permissionButtonAttrs(true, "重试", "tasks.control")}>重试</button>
+    <button class="mini-button task-retry" data-id="${task.id}" ${permissionButtonAttrs(canRetry, "重试", "tasks.control")}>重试</button>
     <button class="mini-button task-pause" data-id="${task.id}" ${permissionButtonAttrs(canPause, "暂停", "tasks.control")}>暂停</button>
     <button class="mini-button task-resume" data-id="${task.id}" ${permissionButtonAttrs(canResume, "继续", "tasks.control")}>继续</button>
     <button class="mini-button task-log" data-id="${task.id}" title="查看任务日志">日志</button>
     <button class="mini-button task-restore" data-id="${task.id}" ${permissionButtonAttrs(canRestore, "恢复宏备份", "tasks.control")}>恢复</button>
     <button class="mini-button task-download" data-id="${task.id}" title="打包下载">打包</button>
-    <button class="mini-button task-cancel" data-id="${task.id}" ${permissionButtonAttrs(true, "取消", "tasks.control")}>取消</button>
+    <button class="mini-button task-cancel" data-id="${task.id}" ${permissionButtonAttrs(canCancel, "取消", "tasks.control")}>取消</button>
   </div>`;
 }
 
@@ -1584,7 +1590,7 @@ function renderTaskDetail() {
     <dt>任务 ID</dt><dd>${escapeHtml(task.id)}</dd>
     <dt>执行模式</dt><dd>${escapeHtml(modeLabels[task.execute_mode] || task.execute_mode)}</dd>
     <dt>进度</dt><dd>${escapeHtml(task.progress || 0)}% · ${escapeHtml(formatDuration(task))}</dd>
-    <dt>结果</dt><dd>成功 ${toCount(task.success_count)} / 失败 ${toCount(task.fail_count)} / 可重试 ${toCount(task.retryable_count)}</dd>
+    <dt>结果</dt><dd>成功 ${toCount(task.success_count)} / 失败 ${toCount(task.fail_count)} / 待本地 ${toCount(task.pending_count)} / 已取消 ${toCount(task.cancelled_count)} / 可重试 ${toCount(task.retryable_count)}</dd>
     <dt>时间</dt><dd>${formatTime(task.start_time)} -> ${formatTime(task.end_time)}</dd>
     <dt>输出</dt><dd>${escapeHtml(task.output_path || "未生成")}</dd>
     <dt>本地动作</dt><dd>${escapeHtml(outputAction)}</dd>
@@ -2060,6 +2066,7 @@ function renderInstallProfile() {
   const formulaContract = plan.formula_compatibility || {};
   const contractBlockers = formulaContract.native_handoff_blocking_reasons || [];
   const manifestInstaller = state.localClientManifest?.platform?.installer || {};
+  const manifestInstallerBlockers = manifestInstaller.native_handoff_blocking_reasons || [];
   const warnings = plan.warnings || [];
   const routes = Object.entries(profile.taskRouting || {}).slice(0, 6);
   target.innerHTML = `<div class="profile-summary">
@@ -2132,6 +2139,13 @@ function renderInstallProfile() {
       <div><span>校验要求</span><strong>${manifestInstaller.checksum_required ? "必须校验 SHA256" : "等待安装包"}</strong></div>
       <div><span>路径策略</span><strong>${escapeHtml(manifestInstaller.path_policy || "安装包路径不写入 manifest")}</strong></div>
     </div>
+    <div class="install-boundary-grid">
+      <div><span>清单目标平台</span><strong>${escapeHtml(manifestInstaller.target_platform || manifestInstaller.platform || profile.platform || "-")}</strong></div>
+      <div><span>清单心跳平台</span><strong>${escapeHtml(manifestInstaller.heartbeat_platform || "未连接")}</strong></div>
+      <div><span>清单原生交接</span><strong>${manifestInstaller.native_handoff_allowed ? "允许" : "阻止"}</strong></div>
+      <div><span>清单兜底格式</span><strong>${escapeHtml((manifestInstaller.fallback_formats || ["MathML", "LaTeX", "图片"]).join(" / "))}</strong></div>
+    </div>
+    <p class="install-contract-action">${escapeHtml(manifestInstallerBlockers.length ? `阻断原因：${manifestInstallerBlockers.join(" / ")}` : "manifest 已声明同平台交接边界；跨平台仍需保留兜底格式。")}</p>
     <p>${escapeHtml(manifestInstaller.formula_object_boundary || formulaContract.package_boundary || "Windows .msi 与 macOS .pkg、MathType 原生对象不能跨平台混用。")}</p>
   </section>
   <div class="install-warning-list">
@@ -2881,6 +2895,7 @@ function renderAcceptanceMatrix() {
             <p>${escapeHtml(item.uncovered_risk || "未覆盖风险待补充")}</p>
             <small>阻断：${escapeHtml((item.blocking_reasons || []).join(" / ") || "待确认")}</small>
             <small>环境：${escapeHtml((item.required_environment || []).join(" / ") || "待确认")}</small>
+            ${(item.verification_checklist || []).length ? `<ol class="acceptance-risk-checklist">${item.verification_checklist.map((step) => `<li>${escapeHtml(step)}</li>`).join("")}</ol>` : ""}
           </article>`)
           .join("")
       : "";
@@ -3588,7 +3603,7 @@ function renderAdminReports() {
             <span class="badge ${statusClass(report.status)}">${escapeHtml(report.status)}</span>
           </div>
           <small>${escapeHtml(taskLabels[report.task_type] || report.task_type)} · ${formatTime(report.created_at)}</small>
-          <p>成功 ${escapeHtml(report.success_count || 0)} · 失败 ${escapeHtml(report.fail_count || 0)} · 公式 ${escapeHtml(report.formula_count || 0)} · 宏 ${escapeHtml(report.macro_count || 0)} · 微小图 ${escapeHtml(report.small_image_count || 0)}</p>
+          <p>成功 ${escapeHtml(report.success_count || 0)} · 失败 ${escapeHtml(report.fail_count || 0)} · 待本地 ${escapeHtml(report.pending_count || 0)} · 已取消 ${escapeHtml(report.cancelled_count || 0)} · 公式 ${escapeHtml(report.formula_count || 0)} · 宏 ${escapeHtml(report.macro_count || 0)} · 微小图 ${escapeHtml(report.small_image_count || 0)}</p>
           <div class="row-actions">${downloadButtons(report.id)}<button class="mini-button report-delete danger" data-id="${escapeHtml(report.id)}" ${permissionButtonAttrs(true, "删除报告", "reports.manage")}>删除</button></div>
         </article>`)
         .join("")
@@ -5762,10 +5777,10 @@ function bindEvents() {
 
   document.addEventListener("dragover", (event) => {
     if (event.target.closest(".macro-order-item")) event.preventDefault();
-    const plannerItem = event.target.closest(".planner-item");
-    if (plannerItem) {
+    const plannerTarget = plannerDropTargetAt(event.clientX, event.clientY);
+    if (plannerTarget) {
       event.preventDefault();
-      markPlannerDropTarget(plannerItem, event.clientY);
+      markPlannerDropTarget(plannerTarget.item, plannerTarget.placement);
     }
   });
 
@@ -5778,13 +5793,11 @@ function bindEvents() {
       moveMacroBefore(sourceMacro, macroItem.dataset.macro || "");
       return;
     }
-    const item = event.target.closest(".planner-item");
-    if (!item) return;
+    const plannerTarget = plannerDropTargetAt(event.clientX, event.clientY);
+    if (!plannerTarget) return;
     event.preventDefault();
     const sourceTask = event.dataTransfer?.getData("application/x-k12-planner-task") || event.dataTransfer?.getData("text/plain") || "";
-    const rect = item.getBoundingClientRect();
-    const placement = event.clientY > rect.top + rect.height / 2 ? "after" : "before";
-    movePlannerTaskBefore(sourceTask, item.dataset.task || "", placement);
+    movePlannerTaskBefore(sourceTask, plannerTarget.item.dataset.task || "", plannerTarget.placement);
   });
 
   document.addEventListener("dragend", () => {
@@ -6100,7 +6113,7 @@ function bindEvents() {
 }
 
 function recommendedTasks(files) {
-  if (!files.length) return ["word_to_ppt", "pdf_to_word", "formula_precheck", "small_image_scan"];
+  if (!files.length) return ["word_to_ppt", "formula_precheck", "omml_to_mathtype", "mathtype_format", "pdf_to_word", "excel_to_pdf"];
   const tasks = [];
   const hasType = (type) => files.some((file) => file.file_type === type);
   const any = (predicate) => files.some(predicate);
@@ -6199,7 +6212,6 @@ function handlePlannerHandleKeydown(event) {
 
 function focusPlannerHandle(taskType) {
   window.requestAnimationFrame(() => {
-    // Re-render replaces buttons, so restore focus on the matching handle.
     $$(".planner-drag-handle").find((button) => button.dataset.task === taskType)?.focus();
   });
 }
@@ -6228,8 +6240,8 @@ function updatePlannerPointerDrag(event) {
   plannerPointerDrag.active = true;
   plannerPointerDrag.item.classList.add("dragging");
   event.preventDefault();
-  const target = plannerDropItemAt(event.clientX, event.clientY);
-  if (target) markPlannerDropTarget(target, event.clientY);
+  const target = plannerDropTargetAt(event.clientX, event.clientY);
+  if (target) markPlannerDropTarget(target.item, target.placement);
 }
 
 function finishPlannerPointerDrag(event) {
@@ -6237,8 +6249,8 @@ function finishPlannerPointerDrag(event) {
   const drag = plannerPointerDrag;
   if (drag.active) {
     event.preventDefault();
-    const target = plannerDropItemAt(event.clientX, event.clientY);
-    if (target) movePlannerTaskBefore(drag.task, target.dataset.task || "", plannerDropPlacement(target, event.clientY));
+    const target = plannerDropTargetAt(event.clientX, event.clientY);
+    if (target) movePlannerTaskBefore(drag.task, target.item.dataset.task || "", target.placement);
   }
   drag.handle.releasePointerCapture?.(drag.pointerId);
   cancelPlannerPointerDrag();
@@ -6258,6 +6270,22 @@ function plannerDropItemAt(clientX, clientY) {
   return document.elementFromPoint(clientX, clientY)?.closest(".planner-item");
 }
 
+function plannerDropTargetAt(clientX, clientY) {
+  const directItem = plannerDropItemAt(clientX, clientY);
+  if (directItem) return { item: directItem, placement: plannerDropPlacement(directItem, clientY) };
+  const list = $("#taskPlanner");
+  if (!list) return null;
+  const items = Array.from(list.querySelectorAll(".planner-item"));
+  if (!items.length) return null;
+  const rect = list.getBoundingClientRect();
+  if (clientX < rect.left || clientX > rect.right || clientY < rect.top - 24 || clientY > rect.bottom + 24) return null;
+  for (const item of items) {
+    const itemRect = item.getBoundingClientRect();
+    if (clientY < itemRect.top + itemRect.height / 2) return { item, placement: "before" };
+  }
+  return { item: items[items.length - 1], placement: "after" };
+}
+
 function plannerDropPlacement(item, clientY) {
   const rect = item.getBoundingClientRect();
   return clientY > rect.top + rect.height / 2 ? "after" : "before";
@@ -6269,9 +6297,9 @@ function resetPlannerDropTargets() {
   });
 }
 
-function markPlannerDropTarget(item, clientY) {
+function markPlannerDropTarget(item, placementOrClientY) {
   resetPlannerDropTargets();
-  const placement = plannerDropPlacement(item, clientY);
+  const placement = typeof placementOrClientY === "string" ? placementOrClientY : plannerDropPlacement(item, placementOrClientY);
   item.classList.add(placement === "after" ? "drop-after" : "drop-before");
 }
 
@@ -6359,7 +6387,6 @@ function compatibilityLabel(mode) {
 
 function installContractBadgeClass(contract = {}) {
   const blockers = contract.native_handoff_blocking_reasons || [];
-  // Platform mismatch must stay visible because MathType native objects are not portable.
   if (blockers.includes("platform_mismatch") || contract.status === "平台不符") return "warn";
   if (blockers.length || contract.status === "需同平台") return "warn";
   if (contract.native_handoff_allowed || contract.status === "同平台可交接" || contract.status === "跨平台兜底") return "good";

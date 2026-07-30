@@ -9,6 +9,7 @@ contracts auditable.
 from __future__ import annotations
 
 import csv
+import hashlib
 import html
 import json
 import zipfile
@@ -19,6 +20,10 @@ from typing import Any
 from .converters import build_text_pdf
 from .models import ReportItem
 from .previews import build_file_preview
+
+
+PENDING_ARTIFACT_STATUSES = {"待本地客户端执行"}
+CANCELLED_ARTIFACT_STATUSES = {"local_execution_cancelled"}
 
 
 class ReportBuilder:
@@ -43,9 +48,46 @@ class ReportBuilder:
         batch_success_count = sum(1 for item in batch_results if item.get("status") == "成功")
         batch_fail_count = sum(1 for item in batch_results if item.get("status") == "失败")
         batch_skipped_count = sum(1 for item in batch_results if item.get("status") == "跳过" or item.get("skipped"))
-        validation_failures = sum(1 for file in files if file.get("validation_errors"))
-        success_count = max(0, len(files) - validation_failures)
-        fail_count = validation_failures
+        validation_failure_file_ids = {
+            str(file.get("id") or "")
+            for file in files
+            if file.get("validation_errors")
+        }
+        artifact_failure_file_ids = {
+            str(item.get("file_id") or "")
+            for item in artifacts
+            if item.get("status") not in {"成功", "跳过", *PENDING_ARTIFACT_STATUSES, *CANCELLED_ARTIFACT_STATUSES}
+        }
+        artifact_pending_file_ids = {
+            str(item.get("file_id") or "")
+            for item in artifacts
+            if item.get("status") in PENDING_ARTIFACT_STATUSES
+        }
+        artifact_cancelled_file_ids = {
+            str(item.get("file_id") or "")
+            for item in artifacts
+            if item.get("status") in CANCELLED_ARTIFACT_STATUSES
+        }
+        image_failure_file_ids = {
+            str(item.get("file_id") or "")
+            for item in image_errors
+            if item.get("file_id")
+        }
+        failed_file_ids = {
+            file_id
+            for file_id in validation_failure_file_ids | artifact_failure_file_ids | image_failure_file_ids
+            if file_id
+        }
+        fail_count = len(failed_file_ids)
+        pending_file_ids = {file_id for file_id in artifact_pending_file_ids - failed_file_ids if file_id}
+        pending_count = len(pending_file_ids)
+        cancelled_file_ids = {
+            file_id
+            for file_id in artifact_cancelled_file_ids - failed_file_ids - pending_file_ids
+            if file_id
+        }
+        cancelled_count = len(cancelled_file_ids)
+        success_count = max(0, len(files) - fail_count - pending_count - cancelled_count)
         if task.get("task_type") == "batch_process" and batch_results:
             success_count = batch_success_count
             fail_count = batch_fail_count
@@ -65,7 +107,7 @@ class ReportBuilder:
             macro_fail_count=sum(1 for item in macros if item.get("execute_status") == "失败"),
             formatted_formula_count=sum(1 for item in formulas if item.get("format_status") == "已格式化"),
             small_image_count=len(small_images),
-            error_count=fail_count + len(image_errors),
+            error_count=fail_count,
         )
         payload = report.to_dict()
         payload["files"] = files
@@ -79,6 +121,14 @@ class ReportBuilder:
         payload["file_omml_missing_count"] = sum(1 for file in files if file.get("missing_omml_dependency"))
         payload["macro_queued_count"] = sum(1 for item in macros if item.get("execute_status") in {"待本地客户端执行", "待确认"})
         payload["artifact_count"] = sum(1 for item in artifacts if item.get("status") == "成功")
+        payload["artifact_failure_count"] = sum(1 for item in artifacts if item.get("status") not in {"成功", "跳过", *PENDING_ARTIFACT_STATUSES, *CANCELLED_ARTIFACT_STATUSES})
+        payload["artifact_pending_count"] = sum(1 for item in artifacts if item.get("status") in PENDING_ARTIFACT_STATUSES)
+        payload["artifact_cancelled_count"] = sum(1 for item in artifacts if item.get("status") in CANCELLED_ARTIFACT_STATUSES)
+        payload["failed_file_ids"] = sorted(failed_file_ids)
+        payload["pending_file_ids"] = sorted(pending_file_ids)
+        payload["pending_count"] = pending_count
+        payload["cancelled_file_ids"] = sorted(cancelled_file_ids)
+        payload["cancelled_count"] = cancelled_count
         payload["batch_total_count"] = len(batch_results)
         payload["batch_success_count"] = batch_success_count
         payload["batch_fail_count"] = batch_fail_count
@@ -114,6 +164,7 @@ class ReportBuilder:
 
     def rewrite(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Rewrite existing report payload data to disk-backed artifacts."""
+        payload.pop("report_file_integrity", None)
         json_path = Path(payload.get("json_path") or self.store.reports_dir / f"{payload['id']}.json")
         html_path = Path(payload.get("html_path") or self.store.reports_dir / f"{payload['id']}.html")
         pdf_path = Path(payload.get("pdf_path") or self.store.reports_dir / f"{payload['id']}.pdf")
@@ -127,13 +178,31 @@ class ReportBuilder:
         payload["txt_path"] = str(txt_path)
         payload["failure_csv_path"] = str(failure_csv_path)
         payload["report_path"] = str(html_path)
-        json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         html_path.write_text(self._html(payload), encoding="utf-8")
         txt_path.write_text(self._text(payload), encoding="utf-8")
         failure_csv_path.write_text(self._failure_csv(payload.get("failureRows", [])), encoding="utf-8")
         build_text_pdf(self._pdf_lines(payload), pdf_path, payload["report_type"])
         self._write_xlsx(payload, xlsx_path)
+        integrity = {
+            key: self._file_integrity(path)
+            for key, path in (
+                ("html_path", html_path),
+                ("pdf_path", pdf_path),
+                ("xlsx_path", xlsx_path),
+                ("txt_path", txt_path),
+                ("failure_csv_path", failure_csv_path),
+            )
+        }
+        payload["report_file_integrity"] = integrity
+        json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        integrity["json_path"] = self._file_integrity(json_path)
         return payload
+
+    @staticmethod
+    def _file_integrity(path: Path) -> dict[str, Any]:
+        """Return server-measured integrity metadata for one report export."""
+        data = path.read_bytes()
+        return {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
 
     @staticmethod
     def _report_type(task_type: str) -> str:
@@ -169,7 +238,7 @@ class ReportBuilder:
     def _summary(payload: dict[str, Any]) -> list[str]:
         """Build the top-level report summary lines from counted payload fields."""
         return [
-            f"成功文件 {payload['success_count']} 个，失败文件 {payload['fail_count']} 个。",
+            f"成功文件 {payload['success_count']} 个，待本地处理 {payload.get('pending_count', 0)} 个，已取消 {payload.get('cancelled_count', 0)} 个，失败文件 {payload['fail_count']} 个。",
             f"公式 {payload['formula_count']} 个，OMML {payload['omml_count']} 个，已格式化 {payload['formatted_formula_count']} 个。",
             f"宏 {payload['macro_count']} 个，成功执行 {payload['macro_success_count']} 个，待本地处理 {payload.get('macro_queued_count', 0)} 个。",
             f"微小图片 {payload['small_image_count']} 个，错误 {payload['error_count']} 个。",
@@ -285,7 +354,7 @@ class ReportBuilder:
                     )
                 )
         for item in payload.get("analysis", {}).get("artifacts", []):
-            if item.get("status") != "成功":
+            if item.get("status") not in {"成功", "跳过", *PENDING_ARTIFACT_STATUSES, *CANCELLED_ARTIFACT_STATUSES}:
                 rows.append(
                     ReportBuilder._failure_row(
                         "转换输出",
@@ -350,7 +419,14 @@ class ReportBuilder:
         formula_position_issues = sum(1 for item in formulas if item.get("position_status") == "异常位置")
         possible_loss = self._possible_loss_notes(payload, analysis)
         return [
-            self._quality_summary_row("file_total", "处理文件总数", str(len(files)), "通过", f"成功 {payload.get('success_count', 0)} 个，失败 {payload.get('fail_count', 0)} 个", "处理失败文件后重试"),
+            self._quality_summary_row(
+                "file_total",
+                "处理文件总数",
+                str(len(files)),
+                "失败" if payload.get("fail_count") else ("需确认" if payload.get("pending_count") or payload.get("cancelled_count") else "通过"),
+                f"成功 {payload.get('success_count', 0)} 个，待本地处理 {payload.get('pending_count', 0)} 个，已取消 {payload.get('cancelled_count', 0)} 个，失败 {payload.get('fail_count', 0)} 个",
+                "启动本地客户端处理等待文件" if payload.get("pending_count") and not payload.get("fail_count") else ("如需继续，请重试已取消文件" if payload.get("cancelled_count") and not payload.get("fail_count") else "处理失败文件后重试"),
+            ),
             self._quality_summary_row("omml_formulas", "OMML 公式数量", str(omml_formula_count), "通过" if omml_formula_count == 0 else "需确认", "来自 Word 原生公式检测和 OMML 转换确认记录", "确认是否转为 MathType 或保留原公式"),
             self._quality_summary_row("omml_conversion", "OMML 转 MathType", f"已确认 {omml_selected_count} 个，待确认 {omml_waiting_count} 个，异常 {omml_failure_count} 个", "失败" if omml_failure_count else ("需确认" if omml_waiting_count else "通过"), "当前记录转换决策和依赖状态，真实转换交给本地客户端", "修复依赖并完成用户确认"),
             self._quality_summary_row("mathtype_formulas", "MathType 公式数量", str(mathtype_formula_count), "通过", "来自公式报告和文件对象检测", "跨平台交付时保留 MathML/LaTeX 或图片兜底"),
@@ -457,7 +533,9 @@ class ReportBuilder:
         macro_failures = [item for item in macros if item.get("execute_status") == "失败"]
         blocked_macros = [item for item in macros if item.get("execute_status") in {"已禁用", "未授权"}]
         queued_macros = [item for item in macros if item.get("execute_status") in {"待本地客户端执行", "待确认"}]
-        artifact_errors = [item for item in artifacts if item.get("status") not in {"成功", "跳过"}]
+        artifact_errors = [item for item in artifacts if item.get("status") not in {"成功", "跳过", *PENDING_ARTIFACT_STATUSES, *CANCELLED_ARTIFACT_STATUSES}]
+        pending_artifacts = [item for item in artifacts if item.get("status") in PENDING_ARTIFACT_STATUSES]
+        cancelled_artifacts = [item for item in artifacts if item.get("status") in CANCELLED_ARTIFACT_STATUSES]
         skipped_artifacts = [item for item in artifacts if item.get("status") == "跳过"]
         mathpix_waiting = [item for item in mathpix_jobs if item.get("status") in {"authorization_required", "missing_credentials", "api_error", "missing_local_file", "ocr_disabled"}]
         batch_failures = [item for item in batch_results if item.get("status") == "失败"]
@@ -475,7 +553,7 @@ class ReportBuilder:
         conversion_tasks = {"word_to_ppt", "ppt_to_word", "pdf_to_word", "excel_to_pdf", "excel_to_word", "excel_to_ppt"}
         expected_artifacts = len(files) if task.get("task_type") in conversion_tasks else 0
         successful_artifacts = sum(1 for item in artifacts if item.get("status") == "成功")
-        accounted_artifacts = successful_artifacts + len(skipped_artifacts)
+        accounted_artifacts = successful_artifacts + len(skipped_artifacts) + len(pending_artifacts) + len(cancelled_artifacts)
         checks = [
             *preflight_checks,
             ReportBuilder._quality_item(
@@ -565,10 +643,10 @@ class ReportBuilder:
             ReportBuilder._quality_item(
                 "conversion_output",
                 "转换输出",
-                "失败" if artifact_errors or accounted_artifacts < expected_artifacts else ("需确认" if skipped_artifacts else "通过"),
-                f"成功 {successful_artifacts} 个，跳过 {len(skipped_artifacts)} 个，预期 {expected_artifacts or accounted_artifacts} 个",
-                "部分转换输出未生成" if artifact_errors or accounted_artifacts < expected_artifacts else ("存在按同名策略跳过的输出" if skipped_artifacts else "转换输出已生成"),
-                "查看任务日志并重试失败文件" if artifact_errors or accounted_artifacts < expected_artifacts else ("如需生成被跳过文件，请调整输出同名策略后重试" if skipped_artifacts else "可下载转换结果"),
+                "失败" if artifact_errors or accounted_artifacts < expected_artifacts else ("需确认" if skipped_artifacts or pending_artifacts or cancelled_artifacts else "通过"),
+                f"成功 {successful_artifacts} 个，待本地执行 {len(pending_artifacts)} 个，已取消 {len(cancelled_artifacts)} 个，跳过 {len(skipped_artifacts)} 个，预期 {expected_artifacts or accounted_artifacts} 个",
+                "部分转换输出未生成" if artifact_errors or accounted_artifacts < expected_artifacts else ("旧版 Office 输入等待本地客户端生成输出" if pending_artifacts else ("本地 Office 转换已取消" if cancelled_artifacts else ("存在按同名策略跳过的输出" if skipped_artifacts else "转换输出已生成"))),
+                "查看任务日志并重试失败文件" if artifact_errors or accounted_artifacts < expected_artifacts else ("启动本地 Office 客户端执行并回传结果" if pending_artifacts else ("如需继续转换，请重试任务" if cancelled_artifacts else ("如需生成被跳过文件，请调整输出同名策略后重试" if skipped_artifacts else "可下载转换结果"))),
             ),
             ReportBuilder._quality_item(
                 "mathpix_pdf",

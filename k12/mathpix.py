@@ -186,8 +186,10 @@ class MathpixClient:
             if key in MATHPIX_CONVERSION_FORMATS and bool(value)
         }
         if not formats:
-            # PDF-to-Word always needs at least a DOCX output from Mathpix.
             formats = {"docx": True}
+        # PDF-to-Word always needs a DOCX output even when callers request
+        # optional Mathpix artifacts such as tex.zip, HTML, or line data.
+        formats["docx"] = True
         payload: dict[str, Any] = {"conversion_formats": formats}
         allowed_keys = {
             "metadata",

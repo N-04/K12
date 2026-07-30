@@ -1,8 +1,9 @@
 """Local companion CLI contracts for K12 desktop-only document actions.
 
 The CLI is intentionally conservative: it may inspect payloads, send heartbeats,
-sync dry-run status, and execute explicitly authorized safe file copies. It does
-not call Office, MathType, OMML writeback, or Word macros directly.
+sync dry-run status, bridge redacted native-runner reports, execute explicitly
+authorized safe file copies, and run supported Office for Mac legacy conversions
+only with two explicit flags. MathType, OMML writeback, and Word macros remain disabled.
 """
 
 from __future__ import annotations
@@ -12,15 +13,25 @@ import hashlib
 import json
 import os
 import platform
+import re
 import shutil
 import socket
+import subprocess
 import sys
+import zipfile
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
+from .converters import (
+    build_docx_from_slides,
+    build_pptx_from_docx,
+    extract_docx_blocks,
+    extract_docx_object_summary,
+    extract_pptx_slides,
+)
 from .install_profiles import normalize_platform
 
 
@@ -28,12 +39,256 @@ LOCAL_CLIENT_VERSION = "0.1.0"
 SAFE_CAPABILITY_KEYS = {"officeAutomation", "mathTypeAutomation", "macroExecution", "ommlDependencySearch"}
 SAFE_COMPONENT_KEYS = {"office", "word", "powerpoint", "excel", "mathtype", "libreoffice", "omml_dependency"}
 OMML_DEPENDENCY_SUFFIXES = {".xsl", ".xslt", ".xml", ".mml"}
+SAFE_NATIVE_ACTION_TYPES = {"office_conversion", "omml_mathtype", "pdf_formula_mathtype", "macro_sequence", "open_output_directory"}
+MACOS_OFFICE_APPS = {
+    "word": Path("/Applications/Microsoft Word.app"),
+    "powerpoint": Path("/Applications/Microsoft PowerPoint.app"),
+}
 
 
 class LocalClientError(RuntimeError):
     """Raised when the companion CLI cannot complete a safe handoff step."""
 
     code = "local_client_error"
+
+
+def macos_office_adapter_available(application: str) -> bool:
+    """Return whether an Office for Mac app and the AppleScript bridge are available."""
+    app = MACOS_OFFICE_APPS.get(str(application or "").lower())
+    return bool(app and app.exists() and Path("/usr/bin/osascript").is_file())
+
+
+def normalize_macos_office_document(
+    source: Path,
+    target: Path,
+    application: str,
+    timeout_seconds: int = 120,
+) -> dict[str, Any]:
+    """Use an explicitly invoked Office for Mac app to normalize a legacy document to OOXML."""
+    app_key = str(application or "").lower()
+    expected_suffix = {"word": ".docx", "powerpoint": ".pptx"}.get(app_key)
+    if not expected_suffix:
+        raise LocalClientError("macOS Office 适配器仅支持 Word 或 PowerPoint")
+    if not macos_office_adapter_available(app_key):
+        raise LocalClientError(f"macOS Office 适配器不可用：{app_key}")
+    source_path = source.expanduser().resolve()
+    target_path = target.expanduser().resolve()
+    if not source_path.is_file():
+        raise LocalClientError("Office 转换源文件不存在")
+    if target_path.suffix.lower() != expected_suffix:
+        raise LocalClientError(f"Office 规范化输出必须为 {expected_suffix}")
+    if source_path == target_path:
+        raise LocalClientError("Office 规范化不能覆盖输入文件")
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    script = _macos_office_normalize_script(app_key)
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/osascript", "-e", script, "--", str(source_path), str(target_path)],
+            capture_output=True,
+            text=True,
+            timeout=max(1, min(int(timeout_seconds), 900)),
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise LocalClientError(f"macOS Office 执行失败：{exc.__class__.__name__}") from exc
+    if completed.returncode != 0:
+        message = re.sub(r"\s+", " ", str(completed.stderr or completed.stdout or "Office AppleScript 返回失败")).strip()
+        raise LocalClientError(f"macOS Office 执行失败：{message[:240]}")
+    if not target_path.is_file() or target_path.stat().st_size <= 0:
+        raise LocalClientError("macOS Office 未生成规范化输出")
+    validation_error = _macos_office_output_validation_error(target_path, expected_suffix)
+    if validation_error:
+        target_path.unlink(missing_ok=True)
+        raise LocalClientError(f"macOS Office 输出校验失败：{validation_error}")
+    data = target_path.read_bytes()
+    return {
+        "schema_version": "k12.macosOfficeNormalization.v1",
+        "application": app_key,
+        "output_type": expected_suffix.lstrip("."),
+        "output_path": str(target_path),
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "native_execution_performed": True,
+    }
+
+
+def _macos_office_output_validation_error(path: Path, suffix: str) -> str:
+    """Return an error when an Office-normalized OOXML package is incomplete or corrupt."""
+    required = {
+        ".docx": {"[Content_Types].xml", "word/document.xml"},
+        ".pptx": {"[Content_Types].xml", "ppt/presentation.xml"},
+    }.get(suffix, set())
+    try:
+        with zipfile.ZipFile(path) as archive:
+            names = set(archive.namelist())
+            corrupt = archive.testzip()
+    except (OSError, zipfile.BadZipFile):
+        return "输出不是可打开的 OOXML ZIP"
+    missing = sorted(required - names)
+    if missing:
+        return f"缺少关键部件：{', '.join(missing)}"
+    if corrupt:
+        return f"ZIP CRC 校验失败：{Path(corrupt).name}"
+    return ""
+
+
+def _macos_office_normalize_script(application: str) -> str:
+    """Return an argument-driven AppleScript without interpolating local paths into source code."""
+    if application == "word":
+        return """on run argv
+set sourceFile to POSIX file (item 1 of argv)
+set targetFile to item 2 of argv
+tell application \"Microsoft Word\"
+open sourceFile
+set documentRef to active document
+save as documentRef file name targetFile file format format document
+close documentRef saving no
+end tell
+end run"""
+    return """on run argv
+set sourceFile to POSIX file (item 1 of argv)
+set targetFile to (POSIX file (item 2 of argv)) as text
+tell application \"Microsoft PowerPoint\"
+open sourceFile
+set presentationRef to active presentation
+save presentationRef in targetFile as save as Open XML presentation
+close presentationRef
+end tell
+end run"""
+
+
+def execute_macos_office_task(payload: dict[str, Any], allow_native_execution: bool = False) -> dict[str, Any]:
+    """Execute supported legacy Office conversions from a sensitive token-gated task payload."""
+    task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+    plan = payload.get("desktop_execution_plan") if isinstance(payload.get("desktop_execution_plan"), dict) else {}
+    actions = plan.get("actions") if isinstance(plan.get("actions"), list) else []
+    office_action = next((item for item in actions if isinstance(item, dict) and item.get("type") == "office_conversion"), None)
+    if not allow_native_execution:
+        raise LocalClientError("macOS Office 执行需要显式原生执行授权")
+    if normalize_platform(platform.system()) != "macOS":
+        raise LocalClientError("macOS Office 适配器只能在 macOS 执行")
+    if not office_action or office_action.get("gate_status") != "ready":
+        raise LocalClientError("Office 转换动作尚未通过本地能力门禁")
+    output_contract = office_action.get("output_contract") if isinstance(office_action.get("output_contract"), dict) else {}
+    output_root = Path(str(output_contract.get("output_directory") or "")).expanduser().resolve()
+    if not output_root.is_dir() or not os.access(output_root, os.W_OK):
+        raise LocalClientError("任务受管输出目录不可写")
+    task_type = str(task.get("task_type") or "")
+    files = payload.get("files") if isinstance(payload.get("files"), list) else []
+    outputs: list[dict[str, Any]] = []
+    failures: list[str] = []
+    for file in files:
+        if not isinstance(file, dict):
+            continue
+        try:
+            outputs.append(_execute_macos_office_file(file, task_type, output_root))
+        except LocalClientError as exc:
+            failures.append(str(exc)[:240])
+    generated_count = len(outputs)
+    rollback_count = 0
+    if failures and outputs:
+        rollback_count = _rollback_macos_office_outputs(outputs, output_root)
+        if rollback_count != generated_count:
+            failures.append("部分成功产物回滚不完整，需要人工清理任务输出目录")
+        outputs = []
+    success = bool(outputs) and not failures and len(outputs) == len([item for item in files if isinstance(item, dict)])
+    action_result = {
+        "type": "office_conversion",
+        "status": "success" if success else ("partial_success" if outputs else "failed"),
+        "native_execution_performed": success,
+        "required_capabilities": [{"key": "officeAutomation", "label": "Office 自动化", "available": True}],
+        "step_count": 3,
+        "successful_step_count": 3 if success else 0,
+        "output_artifact_types": sorted({str(item.get("output_type") or "") for item in outputs}),
+        "message": "macOS Office 转换完成" if success else (failures[0] if failures else "没有可执行的 Office 输入"),
+    }
+    return {
+        "schema_version": "k12.macosOfficeTaskExecution.v1",
+        "task_id": str(task.get("id") or ""),
+        "status": "success" if success else ("partial_success" if outputs else "failed"),
+        "native_execution_performed": success,
+        "actions": [action_result],
+        "outputs": outputs,
+        "generated_before_rollback_count": generated_count if failures else 0,
+        "rollback_count": rollback_count,
+        "rollback_complete": not failures or rollback_count == generated_count,
+        "failure_count": len(failures),
+        "failures": failures,
+    }
+
+
+def _rollback_macos_office_outputs(outputs: list[dict[str, Any]], output_root: Path) -> int:
+    """Delete only this execution's final artifacts when a batch cannot commit atomically."""
+    root = output_root.resolve()
+    removed = 0
+    for output in outputs:
+        path = Path(str(output.get("path") or ""))
+        try:
+            resolved = path.resolve()
+            if resolved.parent != root or not resolved.is_file():
+                continue
+            resolved.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _execute_macos_office_file(file: dict[str, Any], task_type: str, output_root: Path) -> dict[str, Any]:
+    """Normalize one verified legacy Office snapshot and build its final K12 artifact."""
+    source = Path(str(file.get("input_path") or "")).expanduser().resolve()
+    snapshot_root = (output_root / ".inputs").resolve()
+    if not snapshot_root.is_dir() or source.parent != snapshot_root:
+        raise LocalClientError("Office 输入必须是任务 .inputs 目录中的直接快照文件")
+    if not source.is_file():
+        raise LocalClientError("Office 输入快照不存在")
+    expected_size = int(file.get("file_size") or 0)
+    source_data = source.read_bytes()
+    expected_hash = str(file.get("source_sha256") or "")
+    if expected_size != len(source_data) or not re.fullmatch(r"[0-9a-f]{64}", expected_hash) or hashlib.sha256(source_data).hexdigest() != expected_hash:
+        raise LocalClientError("Office 输入快照完整性校验失败")
+    extension = str(file.get("extension") or source.suffix).lower()
+    file_id = re.sub(r"[^A-Za-z0-9_-]", "", str(file.get("id") or "file"))[-24:] or "file"
+    stem = Path(str(file.get("file_name") or source.name)).stem or "output"
+    if task_type == "word_to_ppt" and extension in {".doc", ".dot"}:
+        application, intermediate_suffix, final_suffix = "word", ".docx", ".pptx"
+    elif task_type == "ppt_to_word" and extension == ".ppt":
+        application, intermediate_suffix, final_suffix = "powerpoint", ".pptx", ".docx"
+    else:
+        raise LocalClientError("当前 macOS Office 适配器不支持该任务与文件格式组合")
+    intermediate = output_root / f".native-{file_id}{intermediate_suffix}"
+    target = output_root / f"{stem}-{file_id}{final_suffix}"
+    if target.exists() or intermediate.exists():
+        raise LocalClientError("Office 目标文件已存在，拒绝覆盖未确认产物")
+    try:
+        normalize_macos_office_document(source, intermediate, application)
+        if task_type == "word_to_ppt":
+            blocks = extract_docx_blocks(intermediate)
+            objects = extract_docx_object_summary(intermediate)
+            build_pptx_from_docx(blocks, target, object_preservation={"source": objects})
+        else:
+            slides = extract_pptx_slides(intermediate)
+            build_docx_from_slides(slides, target)
+        validation_error = _macos_office_output_validation_error(target, final_suffix)
+        if validation_error:
+            raise LocalClientError(f"最终转换产物校验失败：{validation_error}")
+        output_data = target.read_bytes()
+        return {
+            "file_id": str(file.get("id") or ""),
+            "file_name": target.name,
+            "output_type": final_suffix.lstrip("."),
+            "path": str(target),
+            "size": len(output_data),
+            "sha256": hashlib.sha256(output_data).hexdigest(),
+            "native_execution_performed": True,
+        }
+    except (LocalClientError, OSError, ValueError, zipfile.BadZipFile) as exc:
+        target.unlink(missing_ok=True)
+        if isinstance(exc, LocalClientError):
+            raise
+        raise LocalClientError(f"macOS Office 最终转换失败：{exc.__class__.__name__}") from exc
+    finally:
+        intermediate.unlink(missing_ok=True)
 
 
 def normalize_origin(origin: str) -> str:
@@ -96,17 +351,24 @@ def build_component_preflight(platform_name: str = "") -> dict[str, Any]:
     office_available = any(components[key]["available"] for key in ("word", "powerpoint", "excel"))
     mathtype_available = components["mathtype"]["available"]
     windows_native = detected == "Windows"
+    macos_office_native = bool(
+        detected == "macOS"
+        and (
+            (components["word"]["available"] and macos_office_adapter_available("word"))
+            or (components["powerpoint"]["available"] and macos_office_adapter_available("powerpoint"))
+        )
+    )
     return {
         "schema_version": "k12.localClientPreflight.v1",
         "platform": detected,
         "components": components,
         "capabilities": {
-            "officeAutomation": bool(windows_native and office_available),
+            "officeAutomation": bool((windows_native and office_available) or macos_office_native),
             "mathTypeAutomation": bool(windows_native and mathtype_available),
             "macroExecution": bool(windows_native and components["word"]["available"]),
             "ommlDependencySearch": True,
         },
-        "executes_native_documents": False,
+        "executes_native_documents": macos_office_native,
         "path_policy": "component paths are not reported",
     }
 
@@ -134,7 +396,7 @@ def sanitize_component_preflight(preflight: dict[str, Any]) -> dict[str, Any]:
         "platform": normalize_platform(str(preflight.get("platform") or platform.system())),
         "components": components,
         "capabilities": capabilities,
-        "executes_native_documents": False,
+        "executes_native_documents": bool(preflight.get("executes_native_documents")),
         "path_policy": "component paths are not reported",
     }
 
@@ -314,6 +576,193 @@ def summarize_payload(payload: dict[str, Any]) -> dict[str, Any]:
             "摘要不输出 input_path、output_path 或安全令牌",
         ],
     }
+
+
+def summarize_manifest(manifest: dict[str, Any]) -> dict[str, Any]:
+    """Summarize manifest installer and formula boundaries without leaking local paths or tokens."""
+    platform_info = manifest.get("platform") if isinstance(manifest.get("platform"), dict) else {}
+    installer = platform_info.get("installer") if isinstance(platform_info.get("installer"), dict) else {}
+    formula_compatibility = (
+        platform_info.get("formula_compatibility")
+        if isinstance(platform_info.get("formula_compatibility"), dict)
+        else {}
+    )
+    formula_object_interop = (
+        platform_info.get("formula_object_interop")
+        if isinstance(platform_info.get("formula_object_interop"), dict)
+        else {}
+    )
+    security = manifest.get("security") if isinstance(manifest.get("security"), dict) else {}
+    queue = manifest.get("queue") if isinstance(manifest.get("queue"), dict) else {}
+    companion_cli = manifest.get("companion_cli") if isinstance(manifest.get("companion_cli"), dict) else {}
+    selected_platform = normalize_platform(str(platform_info.get("selected") or installer.get("platform") or ""))
+    safe_installer = _safe_manifest_installer_summary(installer, selected_platform)
+    safe_formula_compatibility = _safe_manifest_formula_compatibility(
+        formula_compatibility,
+        safe_installer["platform"],
+        safe_installer["heartbeat_platform"],
+    )
+    return {
+        "schema_version": "k12.localClientManifestSummary.v1",
+        "manifest_schema_version": str(manifest.get("schema_version") or ""),
+        "selected_platform": selected_platform,
+        "pending_local_task_count": int(queue.get("pending_local_task_count") or 0),
+        "next_task_id": str(queue.get("next_task_id") or ""),
+        "platform": {
+            "selected": selected_platform,
+            "installer_kind": _safe_manifest_text(platform_info.get("installer_kind") or safe_installer["installer_kind"], 80),
+            "recommended_installer": _safe_manifest_text(platform_info.get("recommended_installer"), 120),
+            "install_plan_endpoint": _safe_local_api_path(platform_info.get("install_plan_endpoint")),
+            "package_boundary": "Windows 使用 .msi，macOS 使用 .pkg；MathType 原生对象必须同平台交接。",
+            "installer": safe_installer,
+            "formula_object_interop": _safe_manifest_formula_interop(formula_object_interop, selected_platform),
+            "formula_compatibility": safe_formula_compatibility,
+        },
+        "security": {
+            "token_configured": bool(security.get("token_configured")),
+            "payload_requires_configured_token": bool(security.get("payload_requires_configured_token")),
+            "heartbeat_requires_configured_token": bool(security.get("heartbeat_requires_configured_token")),
+        },
+        "queue": {
+            "pending_local_task_count": int(queue.get("pending_local_task_count") or 0),
+            "next_task_id": str(queue.get("next_task_id") or ""),
+        },
+        "companion_cli": {
+            "available": bool(companion_cli.get("available")),
+            "dry_run_supported": bool(companion_cli.get("dry_run_supported")),
+            "native_plan_supported": bool(companion_cli.get("native_plan_supported")),
+            "native_report_supported": bool(companion_cli.get("native_report_supported")),
+            "file_actions_supported": bool(companion_cli.get("file_actions_supported")),
+            "macos_office_execution_supported": bool(companion_cli.get("macos_office_execution_supported")),
+            "executes_native_documents": bool(companion_cli.get("executes_native_documents")),
+            "dry_run_execution_schema": str(companion_cli.get("dry_run_execution_schema") or "")[:80],
+            "native_execution_request_schema": str(companion_cli.get("native_execution_request_schema") or "")[:80],
+            "native_execution_report_schema": str(companion_cli.get("native_execution_report_schema") or "")[:80],
+            "file_action_execution_schema": str(companion_cli.get("file_action_execution_schema") or "")[:80],
+            "native_office_execution_schema": str(companion_cli.get("native_office_execution_schema") or "")[:80],
+        },
+        "guardrails": [
+            "manifest 摘要不输出 installers 本地路径、组件路径或安全令牌",
+            "安装包下载必须显式携带 platform=Windows 或 platform=macOS",
+            "Windows 与 macOS MathType 原生对象不跨平台通用，原生对象必须同平台交接",
+        ],
+    }
+
+
+def _safe_manifest_installer_summary(installer: dict[str, Any], selected_platform: str) -> dict[str, Any]:
+    """Return the path-free installer portion of a local-client manifest."""
+    platform_name = normalize_platform(str(installer.get("platform") or selected_platform))
+    file_name = _safe_manifest_file_name(installer.get("file_name"))
+    download_available = bool(installer.get("download_available"))
+    return {
+        "schema_version": str(installer.get("schema_version") or "k12.localInstallerManifest.v1")[:80],
+        "platform": platform_name,
+        "target_platform": normalize_platform(str(installer.get("target_platform") or platform_name)),
+        "heartbeat_platform": normalize_platform(str(installer.get("heartbeat_platform") or "未连接")),
+        "installer_kind": _safe_manifest_text(installer.get("installer_kind"), 80),
+        "file_name": file_name,
+        "status": _safe_manifest_text(installer.get("status"), 80),
+        "download_url": _safe_manifest_download_url(installer.get("download_url"), file_name, platform_name, download_available),
+        "download_requires_platform_query": bool(installer.get("download_requires_platform_query") or file_name),
+        "download_available": download_available,
+        "package_present": bool(installer.get("package_present")),
+        "package_valid": bool(installer.get("package_valid")),
+        "size": int(installer.get("size") or 0),
+        "sha256_available": bool(installer.get("sha256")),
+        "checksum_required": bool(installer.get("checksum_required")),
+        "expected_location_available": bool(installer.get("expected_location_available")),
+        "path_policy": "本地 installers 路径不写入 CLI 摘要；下载必须走 /api/installers/{file_name}?platform=...",
+        "formula_object_boundary": "Windows 与 macOS MathType 原生对象不跨平台通用，原生对象必须同平台交接。",
+        "platform_objects_cross_compatible": False,
+        "same_platform_required_for_native_objects": bool(installer.get("same_platform_required_for_native_objects", platform_name in {"Windows", "macOS"})),
+        "native_handoff_allowed": bool(installer.get("native_handoff_allowed")),
+        "native_handoff_blocking_reasons": _safe_manifest_list(installer.get("native_handoff_blocking_reasons"), 12, 80),
+        "fallback_formats": _safe_formula_format_list(installer.get("fallback_formats"), ["MathML", "LaTeX", "图片"]),
+    }
+
+
+def _safe_manifest_formula_compatibility(
+    value: dict[str, Any],
+    fallback_platform: str,
+    fallback_heartbeat_platform: str,
+) -> dict[str, Any]:
+    """Summarize installer formula compatibility without copying sensitive strings."""
+    target_platform = normalize_platform(str(value.get("target_platform") or fallback_platform))
+    heartbeat_platform = normalize_platform(str(value.get("heartbeat_platform") or fallback_heartbeat_platform))
+    same_platform_required = bool(value.get("same_platform_required_for_native_objects", target_platform in {"Windows", "macOS"}))
+    return {
+        "schema_version": str(value.get("schema_version") or "k12.installFormulaCompatibility.v1")[:80],
+        "target_platform": target_platform,
+        "heartbeat_platform": heartbeat_platform,
+        "status": _safe_manifest_text(value.get("status"), 80),
+        "platform_objects_cross_compatible": False,
+        "same_platform_required_for_native_objects": same_platform_required,
+        "native_handoff_allowed": bool(value.get("native_handoff_allowed")),
+        "native_handoff_blocking_reasons": _safe_manifest_list(value.get("native_handoff_blocking_reasons"), 12, 80),
+        "fallback_formats": _safe_formula_format_list(value.get("fallback_formats"), ["MathML", "LaTeX", "图片"]),
+        "fallback_required_for_cross_platform": bool(value.get("fallback_required_for_cross_platform", True)),
+        "recommended_action": _safe_manifest_text(value.get("recommended_action"), 160),
+        "message": "Windows 与 macOS MathType 原生对象不跨平台通用，原生对象必须同平台交接。",
+    }
+
+
+def _safe_manifest_formula_interop(value: dict[str, Any], fallback_platform: str) -> dict[str, Any]:
+    """Summarize formula object interop without exposing local details."""
+    platform_name = normalize_platform(str(value.get("platform") or fallback_platform))
+    return {
+        "schema_version": str(value.get("schema_version") or "k12.formulaObjectInterop.v1")[:80],
+        "platform": platform_name,
+        "compatibility_mode": _safe_manifest_text(value.get("compatibility_mode") or "platform-specific", 80),
+        "native_object_format": _safe_manifest_text(value.get("native_object_format"), 120),
+        "platform_objects_cross_compatible": False,
+        "same_platform_required_for_native_objects": bool(value.get("same_platform_required_for_native_objects", platform_name in {"Windows", "macOS"})),
+        "native_mathtype_object_allowed": bool(value.get("native_mathtype_object_allowed", platform_name in {"Windows", "macOS"})),
+        "fallback_formats": _safe_formula_format_list(value.get("fallback_formats"), ["MathML", "LaTeX", "图片"]),
+        "fallback_required_for_cross_platform": bool(value.get("fallback_required_for_cross_platform", True)),
+        "message": "Windows 与 macOS MathType 原生对象不跨平台通用，跨系统流转必须保留兜底格式。",
+    }
+
+
+def _safe_manifest_file_name(value: Any) -> str:
+    """Return only the installer basename from a manifest field."""
+    name = str(value or "").replace("\\", "/").split("/")[-1].strip()
+    if not name or ".." in name:
+        return ""
+    return name[:160]
+
+
+def _safe_manifest_download_url(value: Any, file_name: str, platform_name: str, download_available: bool) -> str:
+    """Keep installer download URLs constrained to the local API route."""
+    text = str(value or "").strip()
+    if text.startswith("/api/installers/") and "platform=" in text and "://" not in text:
+        return text[:240]
+    if download_available and file_name and platform_name in {"Windows", "macOS"}:
+        return f"/api/installers/{quote(file_name)}?platform={platform_name}"
+    return ""
+
+
+def _safe_manifest_text(value: Any, limit: int) -> str:
+    """Trim manifest text and drop obvious path or URL material."""
+    text = str(value or "").strip()
+    sensitive_markers = ("://", "/Users/", "/private/", "/var/", "/tmp/", "C:/", "C:\\", "\\Users\\")
+    if any(marker in text for marker in sensitive_markers):
+        return ""
+    return text[:limit]
+
+
+def _safe_local_api_path(value: Any) -> str:
+    """Return only relative local API paths from manifest fields."""
+    text = str(value or "").strip()
+    if text.startswith("/api/") and "://" not in text:
+        return text[:160]
+    return ""
+
+
+def _safe_manifest_list(value: Any, limit: int, item_limit: int) -> list[str]:
+    """Keep manifest list fields compact and serializable."""
+    if not isinstance(value, list):
+        return []
+    return [str(item)[:item_limit] for item in value if isinstance(item, str) and item.strip()][:limit]
 
 
 def build_dry_run_execution_summary(payload: dict[str, Any]) -> dict[str, Any]:
@@ -520,6 +969,127 @@ def build_dry_run_sync_payload(payload: dict[str, Any], result_upload_requested:
     }
 
 
+def build_native_execution_report(
+    payload: dict[str, Any],
+    raw_report: dict[str, Any],
+    platform_name: str = "",
+    client_id: str = "",
+) -> dict[str, Any]:
+    """Build a path-redacted native execution report from a trusted runner result."""
+    task = payload.get("task") if isinstance(payload.get("task"), dict) else {}
+    detected_platform = normalize_platform(platform_name or str(raw_report.get("platform") or platform.system()))
+    actions = [
+        _native_report_action(item, detected_platform)
+        for item in (raw_report.get("actions") if isinstance(raw_report.get("actions"), list) else [])
+        if isinstance(item, dict)
+    ]
+    actions = [item for item in actions if item]
+    successful = [item for item in actions if item["status"] == "success" and item["native_execution_performed"]]
+    status = "success" if actions and len(successful) == len(actions) else ("partial_success" if successful else "no_native_success")
+    return {
+        "schema_version": "k12.localNativeExecutionReport.v1",
+        "task": {
+            "id": str(task.get("id") or "")[:80],
+            "task_type": str(task.get("task_type") or "")[:80],
+            "task_label": str(task.get("task_label") or "")[:120],
+        },
+        "client_id": str(client_id or raw_report.get("client_id") or "")[:120],
+        "platform": detected_platform,
+        "status": status,
+        "native_execution_performed": bool(successful),
+        "action_count": len(actions),
+        "successful_action_count": len(successful),
+        "actions": actions,
+        "path_policy": "no local file paths or tokens are stored",
+    }
+
+
+def _native_report_action(item: dict[str, Any], platform_name: str) -> dict[str, Any]:
+    """Sanitize one native runner action result for local-sync submission."""
+    action_type = str(item.get("type") or "")[:80]
+    if action_type not in SAFE_NATIVE_ACTION_TYPES:
+        return {}
+    status = _native_report_status(str(item.get("status") or item.get("native_status") or ""))
+    native_performed = bool(item.get("native_execution_performed")) and status == "success"
+    return {
+        "action_id": str(item.get("action_id") or "")[:120],
+        "type": action_type,
+        "label": str(item.get("label") or action_type)[:120],
+        "status": status,
+        "native_execution_performed": native_performed,
+        "platform": normalize_platform(str(item.get("platform") or platform_name)),
+        "required_capabilities": _safe_required_capabilities(item.get("required_capabilities")),
+        "step_count": _non_negative_int(item.get("step_count"), 0),
+        "successful_step_count": _non_negative_int(item.get("successful_step_count"), 0),
+        "output_artifact_types": [str(artifact)[:40] for artifact in item.get("output_artifact_types") or [] if isinstance(artifact, str)][:12],
+        "message": _redact_local_path_text(str(item.get("message") or ""))[:240],
+    }
+
+
+def _native_report_status(status: str) -> str:
+    """Normalize a native runner result status for the local-sync schema."""
+    value = str(status or "").strip()
+    aliases = {
+        "completed": "success",
+        "complete": "success",
+        "success": "success",
+        "succeeded": "success",
+        "成功": "success",
+        "failed": "failed",
+        "failure": "failed",
+        "error": "failed",
+        "失败": "failed",
+        "skipped": "skipped",
+        "跳过": "skipped",
+        "blocked": "blocked",
+        "阻断": "blocked",
+        "pending": "pending",
+        "等待": "pending",
+    }
+    return aliases.get(value.lower(), aliases.get(value, value[:80] or "unknown"))
+
+
+def _non_negative_int(value: Any, default: int) -> int:
+    """Read a non-negative integer from native-runner metadata."""
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _redact_local_path_text(text: str) -> str:
+    """Hide common local filesystem paths from native runner messages."""
+    path_pattern = r"(/Users/[^\s，,;]+|/private/[^\s，,;]+|/var/folders/[^\s，,;]+|/tmp/[^\s，,;]+|[A-Za-z]:\\[^\s，,;]+)"
+
+    def replacement(match: Any) -> str:
+        """Replace one matched path with a filename-only display label."""
+        raw = str(match.group(0))
+        name = raw.replace("\\", "/").rstrip("/").split("/")[-1]
+        return f"本地路径已隐藏/{name}" if name else "本地路径已隐藏"
+
+    return re.sub(path_pattern, replacement, text)
+
+
+def build_native_report_sync_payload(
+    payload: dict[str, Any],
+    raw_report: dict[str, Any],
+    platform_name: str = "",
+    client_id: str = "",
+    result_upload_requested: bool = False,
+) -> dict[str, Any]:
+    """Build a local-sync payload carrying a redacted native execution report."""
+    report = build_native_execution_report(payload, raw_report, platform_name=platform_name, client_id=client_id)
+    progress = 100 if report["native_execution_performed"] else 95
+    return {
+        "status": "completed" if report["native_execution_performed"] else "running",
+        "progress": progress,
+        "message": "本地客户端已回传脱敏原生执行报告",
+        "outputs": [],
+        "nativeExecutionReport": report,
+        "resultUploadRequested": bool(result_upload_requested),
+    }
+
+
 def build_native_execution_request(payload: dict[str, Any], platform_name: str = "", allow_native_execution: bool = False) -> dict[str, Any]:
     """Build a handoff contract for a future same-platform native runner.
 
@@ -668,7 +1238,7 @@ def _native_action_blockers(
         blockers.append("platform_mismatch")
     if _action_uses_mathtype_contract(action, required_capabilities):
         blockers.extend(_formula_delivery_blockers(formula_delivery, detected_platform, expected_platform))
-    if detected_platform == "macOS" and _action_requires_native_document_runner(action):
+    if detected_platform == "macOS" and _action_requires_native_document_runner(action) and action.get("type") != "office_conversion":
         blockers.append("macos_native_runner_limited")
     elif detected_platform != "Windows" and _action_requires_native_document_runner(action):
         blockers.append("native_runner_not_available_for_platform")
@@ -726,17 +1296,21 @@ def _native_runner_profile(detected_platform: str) -> dict[str, Any]:
         return {
             "schema_version": "k12.nativeRunnerProfile.v1",
             "platform": "macOS",
-            "support_level": "macos_limited_handoff",
-            "native_document_runner_available": False,
-            "office_automation_adapter": "受限：不声明已接入 Office for Mac 自动化",
+            "support_level": "macos_office_applescript_adapter",
+            "native_document_runner_available": bool(
+                macos_office_adapter_available("word") or macos_office_adapter_available("powerpoint")
+            ),
+            "office_automation_adapter": "Office for Mac AppleScript：旧 Word/PPT 规范化后进入 K12 转换器",
             "mathtype_adapter": "受限：仅登记 macOS MathType 同平台合同和兜底格式",
             "macro_adapter": "不可直接执行 Word 宏",
             "supported_operations": [
+                "office.open_source",
+                "office.convert",
                 "formula.export_fallbacks",
                 "manual_review",
                 "shell.open_output_directory",
             ],
-            "guardrail": "macOS MathType 对象不能交给 Windows 链路；当前 CLI 只生成受限交接合同，不执行原生写回。",
+            "guardrail": "macOS Office 仅在显式授权下处理任务快照和受管输出；MathType、OMML 写回与宏仍保持阻断。",
         }
     return {
         "schema_version": "k12.nativeRunnerProfile.v1",
@@ -1026,6 +1600,8 @@ def run_once(
     result_upload_requested: bool = False,
     native_plan: bool = False,
     allow_native_execution: bool = False,
+    execute_native_office: bool = False,
+    native_report_json: str = "",
     execute_file_actions: bool = False,
     timeout: float = 10.0,
     client_id: str = "",
@@ -1034,7 +1610,8 @@ def run_once(
 
     The cycle can send a heartbeat, fetch a token-gated task payload, produce a
     dry-run sync payload, and optionally emit a native execution request
-    contract. It does not run Office, MathType, OMML writeback, or Word macros.
+    contract. Office for Mac runs only when both explicit execution flags are set;
+    MathType, OMML writeback, and Word macros remain disabled.
     """
     safe_origin = normalize_origin(origin)
     manifest_response = request_json(safe_origin, "/api/local-client/manifest", token=token, timeout=timeout)
@@ -1048,16 +1625,13 @@ def run_once(
     result: dict[str, Any] = {
         "schema_version": "k12.localClientRunResult.v1",
         "origin": safe_origin,
-        "manifest": {
-            "schema_version": manifest.get("schema_version"),
-            "platform": (manifest.get("platform") or {}).get("selected", ""),
-            "pending_local_task_count": (manifest.get("queue") or {}).get("pending_local_task_count", 0),
-            "next_task_id": (manifest.get("queue") or {}).get("next_task_id", ""),
-        },
+        "manifest": summarize_manifest(manifest),
         "heartbeat": heartbeat_response.get("heartbeat", heartbeat_response),
         "task": None,
         "sync": None,
+        "native_execution_report": None,
         "native_execution_request": None,
+        "native_office_execution": None,
         "file_action_execution": None,
     }
     if not selected_task_id:
@@ -1070,22 +1644,70 @@ def run_once(
         result["native_execution_request"] = build_native_execution_request(local_payload, allow_native_execution=allow_native_execution)
     if execute_file_actions:
         result["file_action_execution"] = execute_local_file_actions(local_payload, allow_file_actions=True)
-    if sync_dry_run:
+    if execute_native_office:
+        if native_report_json:
+            raise LocalClientError("--execute-native-office 不能与 --native-report-json 同时使用")
+        execution = execute_macos_office_task(local_payload, allow_native_execution=allow_native_execution)
+        sync_payload = build_native_report_sync_payload(
+            local_payload,
+            execution,
+            client_id=client_id,
+            result_upload_requested=result_upload_requested,
+        )
+        sync_payload["outputs"] = execution["outputs"]
+        sync_path = f"/api/tasks/{quote(selected_task_id)}/local-sync"
+        result["native_office_execution"] = {
+            "schema_version": execution["schema_version"],
+            "status": execution["status"],
+            "native_execution_performed": execution["native_execution_performed"],
+            "output_count": len(execution["outputs"]),
+            "generated_before_rollback_count": int(execution.get("generated_before_rollback_count") or 0),
+            "rollback_count": int(execution.get("rollback_count") or 0),
+            "rollback_complete": bool(execution.get("rollback_complete", True)),
+            "failure_count": execution["failure_count"],
+        }
+        result["native_execution_report"] = sync_payload["nativeExecutionReport"]
+        result["sync"] = request_json(safe_origin, sync_path, method="POST", token=token, payload=sync_payload, timeout=timeout)
+    if native_report_json:
+        raw_report = _load_json_file(native_report_json)
+        sync_payload = build_native_report_sync_payload(
+            local_payload,
+            raw_report,
+            client_id=client_id,
+            result_upload_requested=result_upload_requested,
+        )
+        sync_path = f"/api/tasks/{quote(selected_task_id)}/local-sync"
+        result["native_execution_report"] = sync_payload["nativeExecutionReport"]
+        result["sync"] = request_json(safe_origin, sync_path, method="POST", token=token, payload=sync_payload, timeout=timeout)
+    if sync_dry_run and not native_report_json and not execute_native_office:
         sync_payload = build_dry_run_sync_payload(local_payload, result_upload_requested=result_upload_requested)
         sync_path = f"/api/tasks/{quote(selected_task_id)}/local-sync"
         result["sync"] = request_json(safe_origin, sync_path, method="POST", token=token, payload=sync_payload, timeout=timeout)
     return result
 
 
+def _load_json_file(path: str) -> dict[str, Any]:
+    """Load a native runner JSON report from a local file."""
+    report_path = Path(path).expanduser()
+    if not report_path.is_file():
+        raise LocalClientError("原生执行报告 JSON 文件不存在")
+    data = json.loads(report_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise LocalClientError("原生执行报告 JSON 必须是对象")
+    return data
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Create the CLI parser for safe local-client handoff commands."""
-    parser = argparse.ArgumentParser(description="Run the K12 local companion client in safe dry-run mode.")
+    parser = argparse.ArgumentParser(description="Run the K12 local companion client in safe handoff mode.")
     parser.add_argument("--origin", default="http://127.0.0.1:8765", help="K12 local API origin")
     parser.add_argument("--token", default=os.environ.get("K12_LOCAL_TOKEN", ""), help="local API security token or K12_LOCAL_TOKEN")
     parser.add_argument("--task-id", default="", help="task id to fetch; defaults to manifest next_task_id")
     parser.add_argument("--sync-dry-run", action="store_true", help="sync a running status without executing native document actions")
     parser.add_argument("--native-plan", action="store_true", help="include a native execution request contract without executing native document actions")
-    parser.add_argument("--allow-native-execution", action="store_true", help="mark native execution as explicitly requested in the request contract; no native action is executed by this CLI")
+    parser.add_argument("--allow-native-execution", action="store_true", help="explicitly authorize a requested native action; execution still requires a separate --execute-* flag")
+    parser.add_argument("--execute-native-office", action="store_true", help="explicitly execute supported Office for Mac legacy conversion actions; also requires --allow-native-execution")
+    parser.add_argument("--native-report-json", default="", help="read a trusted native runner result JSON and sync a redacted k12.localNativeExecutionReport.v1")
     parser.add_argument("--execute-file-actions", action="store_true", help="execute safe local file actions such as OMML dependency copy; does not execute Office, MathType, or Word macros")
     parser.add_argument("--result-upload-requested", action="store_true", help="mark result upload intent during dry-run sync")
     parser.add_argument("--timeout", type=float, default=10.0, help="HTTP timeout in seconds")
@@ -1107,6 +1729,8 @@ def main(argv: list[str] | None = None) -> int:
             result_upload_requested=args.result_upload_requested,
             native_plan=args.native_plan,
             allow_native_execution=args.allow_native_execution,
+            execute_native_office=args.execute_native_office,
+            native_report_json=args.native_report_json,
             execute_file_actions=args.execute_file_actions,
             timeout=args.timeout,
             client_id=args.client_id,

@@ -1344,6 +1344,21 @@ td .file-name {
   line-height: 1.45;
 }
 
+.acceptance-risk-checklist {
+  display: grid;
+  gap: 6px;
+  margin: 2px 0 0;
+  padding-left: 18px;
+  color: #3f3210;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.acceptance-risk-checklist li {
+  padding-left: 2px;
+  overflow-wrap: anywhere;
+}
+
 .acceptance-matrix-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3175,10 +3190,6 @@ body {
   border-bottom-color: #2563a9;
   background: transparent;
   color: #2563a9;
-}
-
-.nav-item[data-view="menu"] {
-  display: none;
 }
 
 .content {

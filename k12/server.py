@@ -8,6 +8,7 @@ default so the web UI can operate without leaking filesystem details.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import mimetypes
 import re
@@ -643,10 +644,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             "txt": ("txt_path", "text/plain; charset=utf-8"),
         }
         key, content_type = choices.get(file_format, choices["html"])
-        path = Path(report.get(key) or report.get("report_path") or "")
-        if not path.exists():
-            raise JsonError(404, "Report file not found")
-        data = path.read_bytes()
+        path, data = self._read_managed_report(report, key)
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self._send_common_headers()
@@ -657,14 +655,8 @@ class K12RequestHandler(BaseHTTPRequestHandler):
 
     def _send_source_file(self, file_id: str) -> None:
         """Stream a registered source file through the processor download contract."""
-        try:
-            info = self.processor.file_download_info(file_id)
-        except KeyError as exc:
-            raise JsonError(404, "File not found") from exc
-        except ValueError as exc:
-            raise JsonError(404, str(exc)) from exc
+        info, data = self._read_verified_source(file_id)
         path = Path(info["path"])
-        data = path.read_bytes()
         content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         file_name = self._attachment_name(info.get("file_name") or path.name)
         self.send_response(200)
@@ -675,17 +667,27 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_installer(self, file_name: str, query: dict[str, list[str]] | None = None) -> None:
-        """Stream a registered Windows or macOS installer with MathType boundary headers."""
+    def _read_verified_source(self, file_id: str) -> tuple[dict, bytes]:
+        """Read a source snapshot and recheck its registered size and hash."""
         try:
-            requested_platform = (query or {}).get("platform", [None])[0]
-            info = self.processor.installer_download_info(file_name, requested_platform)
-        except FileNotFoundError as exc:
-            raise JsonError(404, "Installer not found") from exc
+            info = self.processor.file_download_info(file_id)
+        except KeyError as exc:
+            raise JsonError(404, "File not found") from exc
         except ValueError as exc:
             raise JsonError(404, str(exc)) from exc
         path = Path(info["path"])
-        data = path.read_bytes()
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise JsonError(404, "文件源不存在，无法下载") from exc
+        if len(data) != int(info["file_size"]) or hashlib.sha256(data).hexdigest() != str(info.get("sha256") or ""):
+            raise JsonError(404, "文件源内容与登记记录不一致，已拒绝下载")
+        return info, data
+
+    def _send_installer(self, file_name: str, query: dict[str, list[str]] | None = None) -> None:
+        """Stream a registered Windows or macOS installer with MathType boundary headers."""
+        info, data = self._read_verified_installer(file_name, query)
+        path = Path(info["path"])
         content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
         safe_name = self._attachment_name(info.get("file_name") or path.name)
         self.send_response(200)
@@ -701,6 +703,24 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Disposition", f'attachment; filename="{safe_name}"')
         self.end_headers()
         self.wfile.write(data)
+
+    def _read_verified_installer(self, file_name: str, query: dict[str, list[str]] | None = None) -> tuple[dict, bytes]:
+        """Read an installer snapshot and recheck its descriptor size and hash."""
+        try:
+            requested_platform = (query or {}).get("platform", [None])[0]
+            info = self.processor.installer_download_info(file_name, requested_platform)
+        except FileNotFoundError as exc:
+            raise JsonError(404, "Installer not found") from exc
+        except ValueError as exc:
+            raise JsonError(404, str(exc)) from exc
+        path = Path(info["path"])
+        try:
+            data = path.read_bytes()
+        except OSError as exc:
+            raise JsonError(404, "Installer not found") from exc
+        if len(data) != int(info.get("file_size") or 0) or hashlib.sha256(data).hexdigest() != str(info.get("sha256") or ""):
+            raise JsonError(404, "Installer content changed after validation")
+        return info, data
 
     def _send_files_bundle(self, query: dict[str, list[str]]) -> None:
         """Build a ZIP of selected source files plus a manifest of successes and failures."""
@@ -719,21 +739,21 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
             for index, file in enumerate(files, start=1):
                 try:
-                    info = self.processor.file_download_info(file["id"])
-                    source = Path(info["path"])
+                    info, source_data = self._read_verified_source(file["id"])
                     zip_path = self._unique_zip_name(f"files/{index:03d}-{Path(info['file_name']).name}", added)
-                    archive.write(source, zip_path)
+                    archive.writestr(zip_path, source_data)
                     rows.append(
                         ",".join(
                             self._csv_cell(value)
                             for value in [file["id"], info["file_name"], file.get("file_type", ""), "成功", "", zip_path, info["file_size"]]
                         )
                     )
-                except (KeyError, ValueError, OSError) as exc:
+                except (KeyError, ValueError, OSError, JsonError) as exc:
+                    message = exc.message if isinstance(exc, JsonError) else str(exc)
                     rows.append(
                         ",".join(
                             self._csv_cell(value)
-                            for value in [file.get("id", ""), file.get("file_name", ""), file.get("file_type", ""), "失败", str(exc), "", 0]
+                            for value in [file.get("id", ""), file.get("file_name", ""), file.get("file_type", ""), "失败", message, "", 0]
                         )
                     )
             archive.writestr("manifest.csv", "\n".join(rows) + "\n")
@@ -748,16 +768,8 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_image_asset(self, asset_path: str) -> None:
-        """Serve cached report images only when they stay inside the managed image root."""
-        root = self.store.images_dir.resolve()
-        target = (self.store.data_dir / asset_path).resolve()
-        try:
-            target.relative_to(root)
-        except ValueError as exc:
-            raise JsonError(404, "Image not found") from exc
-        if not target.exists() or not target.is_file():
-            raise JsonError(404, "Image not found")
-        data = target.read_bytes()
+        """Serve a registered report-image snapshot from the managed image root."""
+        target, data = self._read_verified_image_asset(asset_path)
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         self.send_response(200)
         self.send_header("Content-Type", content_type)
@@ -766,8 +778,38 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _read_verified_image_asset(self, asset_path: str) -> tuple[Path, bytes]:
+        """Read a report image only when its record size and hash match the snapshot."""
+        root = self.store.images_dir.resolve()
+        target = (self.store.data_dir / asset_path).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise JsonError(404, "Image not found") from exc
+        if not target.exists() or not target.is_file():
+            raise JsonError(404, "Image not found")
+        image = next(
+            (
+                item
+                for report in self.store.list_reports()
+                for item in (report.get("analysis") or {}).get("smallImages") or []
+                if Path(str(item.get("image_path") or "")).resolve() == target
+            ),
+            {},
+        )
+        declared_hash = str(image.get("image_hash") or "")
+        if image.get("image_size", "") == "" or not re.fullmatch(r"[0-9a-f]{64}", declared_hash):
+            raise JsonError(404, "Image not found")
+        try:
+            data = target.read_bytes()
+        except OSError as exc:
+            raise JsonError(404, "Image not found") from exc
+        if len(data) != int(image["image_size"]) or hashlib.sha256(data).hexdigest() != declared_hash:
+            raise JsonError(404, "Image not found")
+        return target, data
+
     def _send_replacement_asset(self, file_name: str) -> None:
-        """Serve one uploaded replacement asset from the managed upload cache."""
+        """Serve one registered replacement-image snapshot from the upload cache."""
         safe_name = Path(file_name).name
         root = self.store.uploads_dir.resolve()
         target = (root / safe_name).resolve()
@@ -777,7 +819,16 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             raise JsonError(404, "Replacement image not found") from exc
         if not target.exists() or not target.is_file():
             raise JsonError(404, "Replacement image not found")
+        annotation = next(
+            (item for item in self.store.list_image_annotations() if item.get("replacement_storage_name") == safe_name),
+            {},
+        )
+        declared_hash = str(annotation.get("replacement_sha256") or "")
+        if annotation.get("replacement_file_size", "") == "" or not re.fullmatch(r"[0-9a-f]{64}", declared_hash):
+            raise JsonError(404, "Replacement image not found")
         data = target.read_bytes()
+        if len(data) != int(annotation["replacement_file_size"]) or hashlib.sha256(data).hexdigest() != declared_hash:
+            raise JsonError(404, "Replacement image not found")
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         self.send_response(200)
         self.send_header("Content-Type", content_type)
@@ -793,10 +844,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             raise JsonError(404, "Artifact not found")
         task_id = parts[2]
         file_name = Path("/".join(parts[3:])).name
-        target = self._find_artifact_path(task_id, file_name)
-        if not target.exists() or not target.is_file():
-            raise JsonError(404, "Artifact not found")
-        data = target.read_bytes()
+        target, data = self._read_verified_artifact(task_id, file_name)
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         self.send_response(200)
         self.send_header("Content-Type", content_type)
@@ -806,22 +854,63 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _read_verified_artifact(self, task_id: str, file_name: str) -> tuple[Path, bytes]:
+        """Read an artifact snapshot and recheck its registered size and hash."""
+        target = self._find_artifact_path(task_id, file_name)
+        reports = [report for report in self.store.list_reports() if report.get("task_id") == task_id]
+        latest_report = reports[0] if reports else {}
+        artifact = next(
+            (
+                item
+                for item in latest_report.get("analysis", {}).get("artifacts", [])
+                if item.get("status") == "成功" and item.get("file_name") == file_name
+            ),
+            {},
+        )
+        try:
+            data = target.read_bytes()
+            registered_size = int(artifact.get("size"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise JsonError(404, "Artifact not found") from exc
+        registered_sha256 = str(artifact.get("sha256") or "")
+        if len(data) != registered_size or hashlib.sha256(data).hexdigest() != registered_sha256:
+            raise JsonError(404, "Artifact not found")
+        return target, data
+
     def _find_artifact_path(self, task_id: str, file_name: str) -> Path:
-        """Find a successful artifact path from reports without trusting URL paths."""
-        for report in self.store.list_reports():
-            if report.get("task_id") != task_id:
-                continue
-            for artifact in report.get("analysis", {}).get("artifacts", []):
-                candidate = Path(artifact.get("path") or "")
-                artifact_task_id = str(artifact.get("task_id") or task_id)
-                if (
-                    artifact_task_id == task_id
-                    and artifact.get("status") == "成功"
-                    and artifact.get("file_name") == file_name
-                    and candidate.exists()
-                    and candidate.is_file()
-                ):
-                    return candidate.resolve()
+        """Find a successful artifact from the latest report without trusting URL paths."""
+        output_root = self.store.output_task_dir(task_id).resolve()
+        reports = [report for report in self.store.list_reports() if report.get("task_id") == task_id]
+        latest_report = reports[0] if reports else {}
+        for artifact in latest_report.get("analysis", {}).get("artifacts", []):
+            candidate = Path(artifact.get("path") or "")
+            artifact_task_id = str(artifact.get("task_id") or task_id)
+            if (
+                artifact_task_id == task_id
+                and artifact.get("status") == "成功"
+                and artifact.get("file_name") == file_name
+                and candidate.exists()
+                and candidate.is_file()
+            ):
+                resolved = candidate.resolve()
+                try:
+                    resolved.relative_to(output_root)
+                except ValueError:
+                    continue
+                if resolved.name != file_name:
+                    continue
+                output_type = str(artifact.get("output_type") or resolved.suffix.lstrip("."))
+                if self.processor._output_artifact_validation_error(resolved, output_type):
+                    continue
+                declared_size = artifact.get("size", "")
+                declared_sha256 = str(artifact.get("sha256") or "")
+                if declared_size == "" or not re.fullmatch(r"[0-9a-f]{64}", declared_sha256):
+                    continue
+                if int(declared_size) != resolved.stat().st_size:
+                    continue
+                if self.processor._sha256(resolved) != declared_sha256:
+                    continue
+                return resolved
         raise JsonError(404, "Artifact not found")
 
     def _send_task_bundle(self, task_id: str) -> None:
@@ -833,15 +922,40 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         buffer = BytesIO()
         added: set[str] = set()
         with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
-            archive.writestr("task.json", json.dumps(task, ensure_ascii=False, indent=2))
+            archive.writestr("task.json", json.dumps(self._public_payload(task), ensure_ascii=False, indent=2))
             logs = self.store.list_logs(task_id, limit=1000)
             archive.writestr("logs/task.log", "\n".join(f"{item['created_at']} [{item.get('category', 'system')}/{item['level']}] {self._public_log(item)['message']}" for item in reversed(logs)) + "\n")
             for report in reports:
                 for key in ("html_path", "json_path", "pdf_path", "xlsx_path", "txt_path"):
-                    self._add_bundle_path(archive, Path(report.get(key) or ""), f"reports/{key.removesuffix('_path')}", added)
-                self._add_bundle_path(archive, Path(report.get("failure_csv_path") or ""), "reports/failures", added)
-                for artifact in report.get("analysis", {}).get("artifacts", []):
-                    self._add_bundle_path(archive, Path(artifact.get("path") or ""), "outputs", added)
+                    try:
+                        report_path, report_data = self._read_managed_report(report, key, allow_fallback=False)
+                    except JsonError:
+                        continue
+                    archive_name = f"reports/{key.removesuffix('_path')}/{report_path.name}"
+                    if archive_name not in added:
+                        archive.writestr(archive_name, report_data)
+                        added.add(archive_name)
+                try:
+                    failure_path, failure_data = self._read_managed_report(report, "failure_csv_path", allow_fallback=False)
+                except JsonError:
+                    failure_path = None
+                if failure_path:
+                    archive_name = f"reports/failures/{failure_path.name}"
+                    if archive_name not in added:
+                        archive.writestr(archive_name, failure_data)
+                        added.add(archive_name)
+            latest_report = reports[0] if reports else {}
+            for artifact in latest_report.get("analysis", {}).get("artifacts", []):
+                if artifact.get("status") != "成功":
+                    continue
+                try:
+                    artifact_path, artifact_data = self._read_verified_artifact(task_id, str(artifact.get("file_name") or ""))
+                except JsonError:
+                    continue
+                archive_name = f"outputs/{artifact_path.name}"
+                if archive_name not in added:
+                    archive.writestr(archive_name, artifact_data)
+                    added.add(archive_name)
         data = buffer.getvalue()
         self.send_response(200)
         self.send_header("Content-Type", "application/zip")
@@ -850,6 +964,38 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Disposition", f'attachment; filename="{self._attachment_name(f"{task_id}-results.zip")}"')
         self.end_headers()
         self.wfile.write(data)
+
+    def _managed_report_path(self, report: dict, key: str, allow_fallback: bool = True) -> Path:
+        """Resolve one report file only when its path and registered integrity remain valid."""
+        raw_path = report.get(key) or (report.get("report_path") if allow_fallback else "") or ""
+        candidate = Path(str(raw_path))
+        if not candidate.exists() or not candidate.is_file():
+            raise JsonError(404, "Report file not found")
+        resolved = candidate.resolve()
+        try:
+            resolved.relative_to(self.store.reports_dir.resolve())
+        except ValueError as exc:
+            raise JsonError(404, "Report file not found") from exc
+        integrity = (report.get("report_file_integrity") or {}).get(key) or {}
+        declared_sha256 = str(integrity.get("sha256") or "")
+        if integrity.get("size", "") == "" or not re.fullmatch(r"[0-9a-f]{64}", declared_sha256):
+            raise JsonError(404, "Report file not found")
+        if int(integrity["size"]) != resolved.stat().st_size or self.processor._sha256(resolved) != declared_sha256:
+            raise JsonError(404, "Report file not found")
+        return resolved
+
+    def _read_managed_report(self, report: dict, key: str, allow_fallback: bool = True) -> tuple[Path, bytes]:
+        """Read a report snapshot and recheck its registered size and hash."""
+        path = self._managed_report_path(report, key, allow_fallback=allow_fallback)
+        integrity = (report.get("report_file_integrity") or {}).get(key) or {}
+        try:
+            data = path.read_bytes()
+            declared_size = int(integrity.get("size"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise JsonError(404, "Report file not found") from exc
+        if len(data) != declared_size or hashlib.sha256(data).hexdigest() != str(integrity.get("sha256") or ""):
+            raise JsonError(404, "Report file not found")
+        return path, data
 
     def _send_report_images(self, report_id: str) -> None:
         """Build the small-image ZIP export with annotations and a manifest CSV."""
@@ -868,8 +1014,14 @@ class K12RequestHandler(BaseHTTPRequestHandler):
                 if image_path.exists() and image_path.is_file():
                     file_name = f"images/{index:03d}-{image_path.name}"
                     if file_name not in added:
-                        archive.write(image_path, file_name)
-                        added.add(file_name)
+                        try:
+                            asset_path = image_path.resolve().relative_to(self.store.data_dir.resolve()).as_posix()
+                            _verified_path, image_data = self._read_verified_image_asset(asset_path)
+                        except (JsonError, ValueError):
+                            file_name = ""
+                        else:
+                            archive.writestr(file_name, image_data)
+                            added.add(file_name)
                 annotation = annotations.get(image.get("id"), {})
                 rows.append(
                     ",".join(

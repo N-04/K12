@@ -19,6 +19,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -40,14 +41,17 @@ from .models import (
 )
 from .converters import (
     build_docx,
+    build_docx_from_pdf_text,
     build_docx_from_slides,
     build_docx_from_xlsx,
     build_pdf_from_xlsx,
     build_pptx,
     build_pptx_from_docx,
     build_pptx_from_xlsx,
+    build_text_pdf,
     extract_docx_blocks,
     extract_docx_object_summary,
+    extract_pdf_text_blocks,
     extract_pptx_slides,
     extract_xlsx_sheets,
 )
@@ -69,6 +73,7 @@ REPLACEMENT_IMAGE_MIME_SUFFIXES = {
     "image/bmp": ".bmp",
 }
 MATHPIX_TEX_ENTRY_LIMIT_BYTES = 1024 * 1024
+MATHPIX_TEX_ARCHIVE_LIMIT_BYTES = 50 * 1024 * 1024
 WORKFLOW_TASK_TYPES = tuple(TASK_LABELS.keys())
 OOXML_IMAGE_PREFIXES = {
     "Word": "word/media/",
@@ -235,6 +240,8 @@ class DocumentAnalyzer:
         item.source_kind = "upload"
         if item.extension in {".docx", ".docm", ".dotx", ".dotm", ".pptx", ".pptm", ".xlsx", ".xlsm"}:
             self._analyze_ooxml(path, item)
+        elif item.extension in {".doc", ".dot", ".xls", ".ppt"}:
+            self._analyze_legacy_office(path, item)
         elif item.extension == ".pdf":
             self._analyze_pdf(path, item)
         elif item.extension == ".zip":
@@ -287,6 +294,23 @@ class DocumentAnalyzer:
 
     def _analyze_ooxml(self, path: Path, item: FileItem) -> None:
         """Inspect a supported OOXML ZIP package and enrich the file item."""
+        if self._looks_encrypted_office_container(path):
+            item.encrypted = True
+            self._clear_unreadable_office_capabilities(item)
+            item.validation_errors = [
+                error
+                for error in item.validation_errors
+                if "损坏" not in str(error) and "Open XML" not in str(error)
+            ]
+            if not any("密码" in str(error) or "加密" in str(error) for error in item.validation_errors):
+                item.validation_errors.append("文件已加密，需要密码")
+            item.status = "校验失败"
+            item.content_summary = {
+                "encrypted": True,
+                "container": "OLE Compound File",
+                "passwordStatus": "未输入",
+            }
+            return
         try:
             with zipfile.ZipFile(path) as archive:
                 names = archive.namelist()
@@ -299,8 +323,74 @@ class DocumentAnalyzer:
                 elif item.file_type == "Excel":
                     self._analyze_excel_archive(archive, names, item)
         except zipfile.BadZipFile:
+            self._clear_unreadable_office_capabilities(item)
             item.validation_errors.append("文件损坏或不是有效的 Office Open XML 文档")
             item.status = "校验失败"
+
+    def _analyze_legacy_office(self, path: Path, item: FileItem) -> None:
+        """Validate a legacy Office OLE container before local-client handoff."""
+        self._clear_unreadable_office_capabilities(item)
+        try:
+            with path.open("rb") as handle:
+                prefix = handle.read(5_000_000)
+        except OSError as exc:
+            item.validation_errors.append(f"旧版 Office 文件无法读取：{exc}")
+            item.status = "校验失败"
+            return
+        header_error = self._legacy_office_header_error(prefix)
+        if header_error:
+            item.validation_errors.append(header_error)
+            item.status = "校验失败"
+            item.content_summary = {
+                "container": "OLE Compound File",
+                "containerValid": False,
+                "requiresNativeOffice": True,
+            }
+            return
+        lowered = prefix.lower()
+        encrypted = any(
+            marker.encode("utf-16le").lower() in lowered
+            for marker in ("EncryptionInfo", "EncryptedPackage", "StrongEncryptionDataSpace")
+        )
+        item.encrypted = encrypted
+        item.content_summary = {
+            "container": "OLE Compound File",
+            "containerValid": True,
+            "legacyBinaryOffice": True,
+            "requiresNativeOffice": True,
+            "deepInspectionStatus": "需本地 Office 客户端",
+            "encrypted": encrypted,
+        }
+        if encrypted:
+            item.validation_errors.append("文件已加密，需要密码")
+            item.status = "校验失败"
+
+    @staticmethod
+    def _legacy_office_header_error(data: bytes) -> str:
+        """Return a validation error for an invalid legacy Office CFB header."""
+        if len(data) < 512 or not data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+            return "文件损坏或不是有效的旧版 Office OLE 文档"
+        if data[28:30] != b"\xfe\xff":
+            return "旧版 Office OLE 文件字节序标记异常"
+        sector_shift = int.from_bytes(data[30:32], "little")
+        mini_sector_shift = int.from_bytes(data[32:34], "little")
+        if sector_shift not in {9, 12} or mini_sector_shift != 6:
+            return "旧版 Office OLE 文件扇区头异常"
+        return ""
+
+    @staticmethod
+    def _clear_unreadable_office_capabilities(item: FileItem) -> None:
+        """Clear metadata guesses when an Office package cannot be inspected."""
+        item.page_count = 0
+        item.slide_count = 0
+        item.sheet_count = 0
+        item.has_formula = False
+        item.has_mathtype = False
+        item.has_omml = False
+        item.missing_omml_dependency = False
+        item.has_macro = False
+        item.has_image = False
+        item.has_small_image = False
 
     def _analyze_word_archive(self, archive: zipfile.ZipFile, names: list[str], item: FileItem) -> None:
         """Extract lightweight Word structure, formula, macro, and object counts."""
@@ -317,7 +407,8 @@ class DocumentAnalyzer:
         item.has_omml = "<m:oMath" in document_xml or "<m:oMathPara" in document_xml
         item.has_mathtype = embedded_count > 0 or "Equation Native" in document_xml or "MathType" in document_xml
         item.has_formula = item.has_omml or item.has_mathtype or "$$" in document_xml
-        item.has_macro = item.extension in {".docm", ".dotm"} or "word/vbaProject.bin" in names
+        normalized_names = {name.replace("\\", "/").lower() for name in names}
+        item.has_macro = "word/vbaproject.bin" in normalized_names
         item.has_image = image_count > 0
         item.has_small_image = image_count > 0
         item.content_summary = {
@@ -333,6 +424,8 @@ class DocumentAnalyzer:
             "endnotes": endnotes_xml.count("<w:endnote "),
             "comments": comments_xml.count("<w:comment "),
             "revisions": revision_count,
+            "vbaProjects": 1 if item.has_macro else 0,
+            "macroEnabledContainer": item.extension in {".docm", ".dotm"},
         }
 
     def _mark_omml_dependency(self, item: FileItem, path: Path | None) -> None:
@@ -363,7 +456,8 @@ class DocumentAnalyzer:
         text_blob = "".join(self._read_archive_text(archive, name) for name in slide_names[:30])
         formula_count = self._ppt_formula_count(text_blob)
         item.slide_count = len(slide_names)
-        item.has_macro = item.extension == ".pptm" or "ppt/vbaProject.bin" in names
+        normalized_names = {name.replace("\\", "/").lower() for name in names}
+        item.has_macro = "ppt/vbaproject.bin" in normalized_names
         item.has_mathtype = "MathType" in text_blob or "Equation Native" in text_blob
         item.has_formula = formula_count > 0
         item.has_image = image_count > 0
@@ -380,6 +474,8 @@ class DocumentAnalyzer:
             "masters": master_count,
             "layouts": layout_count,
             "textRuns": text_blob.count("<a:t>"),
+            "vbaProjects": 1 if item.has_macro else 0,
+            "macroEnabledContainer": item.extension == ".pptm",
         }
 
     @staticmethod
@@ -405,7 +501,8 @@ class DocumentAnalyzer:
         table_count = sum(1 for name in names if name.startswith("xl/tables/table") and name.endswith(".xml"))
         text_blob = "".join(self._read_archive_text(archive, name) for name in sheet_names[:20])
         item.sheet_count = len(sheet_names)
-        item.has_macro = item.extension == ".xlsm" or "xl/vbaProject.bin" in names
+        normalized_names = {name.replace("\\", "/").lower() for name in names}
+        item.has_macro = "xl/vbaproject.bin" in normalized_names
         item.has_formula = "<f>" in text_blob or "<f " in text_blob
         item.has_image = image_count > 0
         item.has_small_image = image_count > 0
@@ -418,6 +515,8 @@ class DocumentAnalyzer:
             "comments": comment_count,
             "tables": table_count,
             "mergedCells": text_blob.count("<mergeCell"),
+            "vbaProjects": 1 if item.has_macro else 0,
+            "macroEnabledContainer": item.extension == ".xlsm",
         }
 
     def _analyze_pdf(self, path: Path, item: FileItem) -> None:
@@ -426,7 +525,13 @@ class DocumentAnalyzer:
         text = data.decode("latin-1", errors="ignore")
         item.encrypted = "/Encrypt" in text
         item.page_count = max(1, text.count("/Type /Page") - text.count("/Type /Pages"))
-        text_snippets = self._pdf_text_snippets(text)
+        try:
+            text_blocks = extract_pdf_text_blocks(path)
+        except OSError:
+            text_blocks = []
+        text_snippets = [str(block.get("text") or "") for block in text_blocks if block.get("text")]
+        if not text_snippets:
+            text_snippets = self._pdf_text_snippets(text)
         pdf_images = _pdf_image_descriptors(data)
         image_objects = len(pdf_images) or text.count("/Subtype /Image")
         table_hints = self._pdf_table_hints(text)
@@ -519,13 +624,35 @@ class DocumentAnalyzer:
         try:
             with zipfile.ZipFile(path) as archive:
                 infos = [info for info in archive.infolist() if not info.is_dir()]
+                total_uncompressed = sum(info.file_size for info in infos)
+                encrypted_entries = sum(1 for info in infos if info.flag_bits & 0x1)
+                excessive_ratio_entries = sum(
+                    1
+                    for info in infos
+                    if info.file_size > 10 * 1024 * 1024
+                    and info.file_size / max(1, info.compress_size) > 200
+                )
                 item.archive_entry_count = len(infos)
                 item.content_summary = {
                     "entries": len(infos),
                     "supportedEntries": sum(1 for info in infos if Path(info.filename).suffix.lower() in self.supported_extensions()),
                     "compressedSize": sum(info.compress_size for info in infos),
-                    "uncompressedSize": sum(info.file_size for info in infos),
+                    "uncompressedSize": total_uncompressed,
+                    "encryptedEntries": encrypted_entries,
+                    "excessiveCompressionRatioEntries": excessive_ratio_entries,
+                    "entryLimit": 2000,
+                    "uncompressedSizeLimit": self.single_file_limit,
                 }
+                if len(infos) > 2000:
+                    item.validation_errors.append("ZIP 条目数量超过安全限制")
+                if total_uncompressed > self.single_file_limit:
+                    item.validation_errors.append("ZIP 解压后大小超过单文件安全限制")
+                if excessive_ratio_entries:
+                    item.validation_errors.append("ZIP 包含异常压缩比条目，可能是压缩炸弹")
+                if encrypted_entries:
+                    item.validation_errors.append("ZIP 包含加密条目，需要先解密")
+                if item.validation_errors:
+                    item.status = "校验失败"
         except zipfile.BadZipFile:
             item.validation_errors.append("ZIP 解压失败")
             item.status = "校验失败"
@@ -547,7 +674,30 @@ class DocumentAnalyzer:
     @staticmethod
     def _looks_encrypted_ooxml(names: list[str]) -> bool:
         """Return whether an OOXML package contains encryption sentinel parts."""
-        return "EncryptedPackage" in names or "EncryptionInfo" in names
+        normalized = {name.replace("\\", "/").strip("/").lower() for name in names}
+        return "encryptedpackage" in normalized or "encryptioninfo" in normalized
+
+    @staticmethod
+    def _looks_encrypted_office_container(path: Path) -> bool:
+        """Detect password-protected OOXML stored in an OLE compound container."""
+        try:
+            with path.open("rb") as handle:
+                prefix = handle.read(8192)
+        except OSError:
+            return False
+        compound_magic = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+        if not prefix.startswith(compound_magic):
+            return False
+        # Encrypted OOXML uses an OLE compound file containing EncryptionInfo
+        # and EncryptedPackage streams. Accept the compound signature for
+        # modern OOXML extensions even when the stream directory lies beyond
+        # the bounded prefix; legacy binary Office formats are routed elsewhere.
+        lowered = prefix.lower()
+        return (
+            "EncryptionInfo".encode("utf-16le").lower() in lowered
+            or "EncryptedPackage".encode("utf-16le").lower() in lowered
+            or path.suffix.lower() in {".docx", ".docm", ".dotx", ".dotm", ".pptx", ".pptm", ".xlsx", ".xlsm"}
+        )
 
 
 class TaskProcessor:
@@ -572,7 +722,12 @@ class TaskProcessor:
             int(payload.get("file_size", 0)),
             str(payload.get("file_path", "")),
         )
-        return self.store.save_file(item.to_dict())
+        record = item.to_dict()
+        source_path = Path(item.file_path)
+        if source_path.exists() and source_path.is_file():
+            record["file_size"] = source_path.stat().st_size
+            record["source_sha256"] = self._sha256(source_path)
+        return self.store.save_file(record)
 
     def create_uploaded_file(self, file_name: str, content: bytes) -> list[dict[str, Any]]:
         """Persist uploaded bytes, analyze them, and register ZIP children."""
@@ -593,9 +748,14 @@ class TaskProcessor:
         item = analyzer.analyze_file(target, safe_name)
         if relative_path and relative_path != safe_name:
             item.source_relative_path = relative_path
-        saved = [self.store.save_file(item.to_dict())]
+        record = item.to_dict()
+        record["source_sha256"] = hashlib.sha256(content).hexdigest()
+        saved = [self.store.save_file(record)]
         if item.extension == ".zip" and not item.validation_errors:
             saved.extend(self._register_archive_entries(target, item, analyzer))
+            refreshed_parent = self.store.get_file(item.id)
+            if refreshed_parent:
+                saved[0] = refreshed_parent
         self.store.append_log("system", f"上传文件：{safe_name}", category="upload")
         return saved
 
@@ -619,7 +779,18 @@ class TaskProcessor:
         target.write_bytes(content)
         analyzer = DocumentAnalyzer(settings.get("singleFileLimitMb", 500))
         item = analyzer.analyze_file(target, safe_name)
-        replaced = self.store.replace_file(file_id, item.to_dict())
+        record = item.to_dict()
+        record["source_sha256"] = hashlib.sha256(content).hexdigest()
+        replaced = self.store.replace_file(file_id, record)
+        if item.extension == ".zip" and not item.validation_errors:
+            item.id = file_id
+            item.created_at = str(replaced.get("created_at") or item.created_at)
+            item.source_kind = "upload"
+            item.archive_parent_id = ""
+            self._register_archive_entries(target, item, analyzer)
+            refreshed_parent = self.store.get_file(file_id)
+            if refreshed_parent:
+                replaced = refreshed_parent
         self.store.append_log("system", f"重新上传替换：{safe_name}", category="upload")
         return replaced
 
@@ -654,6 +825,7 @@ class TaskProcessor:
         task["status"] = "处理中"
         task["progress"] = 8
         task["start_time"] = utc_now()
+        task["attempt_started_at_ns"] = time.time_ns()
         self.store.save_task(task)
         self.store.append_log(task_id, f"创建任务：{TASK_LABELS.get(task['task_type'], task['task_type'])}")
 
@@ -666,6 +838,7 @@ class TaskProcessor:
             task["end_time"] = utc_now()
             self.store.append_log(task_id, task["error_message"], "error")
             return self.store.save_task(task)
+        files = self._verify_task_source_files(task, files)
 
         stages = self._stages_for(task["task_type"], task["execute_mode"])
         log_category = self._task_log_category(task["task_type"])
@@ -686,9 +859,13 @@ class TaskProcessor:
             analysis["batchResults"] = self._batch_results(task, files)
             analysis["batchPlan"] = self._batch_plan(task, files, analysis["batchResults"])
         if task["task_type"] == "pdf_to_word":
-            analysis["mathpix"] = self._mathpix_pdf_jobs(task, files)
+            local_pdf_files = [file for file in files if self._is_local_text_pdf(file)]
+            mathpix_files = [file for file in files if file not in local_pdf_files]
+            local_pdf_artifacts, local_pdf_evidence = self._local_pdf_text_artifacts(task, local_pdf_files)
+            analysis["pdfTextLayerConversions"] = local_pdf_evidence
+            analysis["mathpix"] = self._mathpix_pdf_jobs(task, mathpix_files)
             analysis["formulas"].extend(self._mathpix_formula_items(files, analysis["mathpix"], task))
-            analysis["artifacts"] = self._mathpix_artifacts(task, files, analysis["mathpix"])
+            analysis["artifacts"] = local_pdf_artifacts + self._mathpix_artifacts(task, mathpix_files, analysis["mathpix"])
         if task["task_type"] in {"formula_precheck", "omml_to_mathtype", "word_to_ppt", "mathtype_format"}:
             analysis["ommlDependencies"] = self._omml_dependency_jobs(task, files)
             analysis["ommlConversionPrompts"] = self._omml_conversion_prompts(task, files, analysis["ommlDependencies"])
@@ -696,9 +873,15 @@ class TaskProcessor:
             analysis["artifacts"] = self._conversion_artifacts(task, files)
         report = self.report_builder.build(task, files, analysis)
         hard_preflight_failed = any(item.get("status") == "失败" for item in analysis.get("preflightChecks", []))
-        task["status"] = "成功" if report["fail_count"] == 0 and not hard_preflight_failed else "失败"
+        pending_local_outputs = int(report.get("artifact_pending_count") or 0)
+        if report["fail_count"] > 0 or hard_preflight_failed:
+            task["status"] = "失败"
+        elif pending_local_outputs:
+            task["status"] = "待处理"
+        else:
+            task["status"] = "成功"
         self._apply_task_report_summary(task, report)
-        task["progress"] = 100
+        task["progress"] = 95 if pending_local_outputs else 100
         task["output_path"] = str(self.store.output_task_dir(task_id))
         task["end_time"] = utc_now()
         settings = self.store.get_settings()
@@ -718,7 +901,11 @@ class TaskProcessor:
             task["completion_notice"] = {
                 "status": "待前端提示",
                 "level": "success" if task["status"] == "成功" else "warning",
-                "message": f"{TASK_LABELS.get(task['task_type'], task['task_type'])} 已完成：{task['status']}",
+                "message": (
+                    f"{TASK_LABELS.get(task['task_type'], task['task_type'])} 已进入本地客户端队列"
+                    if pending_local_outputs
+                    else f"{TASK_LABELS.get(task['task_type'], task['task_type'])} 已完成：{task['status']}"
+                ),
                 "created_at": utc_now(),
             }
         self.store.save_report(report)
@@ -732,6 +919,51 @@ class TaskProcessor:
             return saved_task
         saved_task["history_saved"] = True
         return saved_task
+
+    def _verify_task_source_files(self, task: dict[str, Any], files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Create verified task snapshots before any analysis or conversion."""
+        verified: list[dict[str, Any]] = []
+        snapshots: list[dict[str, Any]] = []
+        snapshot_dir = self.store.output_task_dir(str(task.get("id") or "")) / ".inputs"
+        snapshot_dir.mkdir(parents=True, exist_ok=True)
+        for original in files:
+            file = dict(original)
+            source_path = str(file.get("storage_path") or file.get("file_path") or "")
+            if source_path:
+                try:
+                    info = self.file_download_info(str(file.get("id") or ""))
+                    suffix = str(file.get("extension") or Path(str(info["path"])).suffix or ".bin")
+                    snapshot = snapshot_dir / f"{file.get('id')}{suffix}"
+                    shutil.copyfile(Path(info["path"]), snapshot)
+                    if snapshot.stat().st_size != int(info["file_size"]) or self._sha256(snapshot) != str(info.get("sha256") or ""):
+                        snapshot.unlink(missing_ok=True)
+                        raise ValueError("源文件在任务快照创建期间发生变化")
+                    file["original_storage_path"] = str(original.get("storage_path") or "")
+                    file["original_file_path"] = str(original.get("file_path") or "")
+                    file["storage_path"] = str(snapshot)
+                    file["file_path"] = str(snapshot)
+                    file["source_kind"] = "task_snapshot"
+                    file["source_sha256"] = str(info.get("sha256") or "")
+                    snapshots.append(
+                        {
+                            "file_id": file.get("id", ""),
+                            "path": str(snapshot),
+                            "size": int(info["file_size"]),
+                            "sha256": str(info.get("sha256") or ""),
+                        }
+                    )
+                except (KeyError, ValueError, OSError) as exc:
+                    error = f"源文件完整性校验失败：{exc}"
+                    errors = list(file.get("validation_errors") or [])
+                    if error not in errors:
+                        errors.append(error)
+                    file["validation_errors"] = errors
+                    file["status"] = "校验失败"
+                    self.store.save_file(file)
+            verified.append(file)
+        task["source_snapshots"] = snapshots
+        self.store.save_task(task)
+        return verified
 
     @classmethod
     def _normalize_workflow_options(cls, task_type: str, options: dict[str, Any]) -> dict[str, Any]:
@@ -781,6 +1013,8 @@ class TaskProcessor:
         """Copy report outcome counts back onto the persisted task record."""
         task["success_count"] = int(report.get("success_count") or report.get("batch_success_count") or 0)
         task["fail_count"] = int(report.get("fail_count") or report.get("batch_fail_count") or 0)
+        task["pending_count"] = int(report.get("pending_count") or 0)
+        task["cancelled_count"] = int(report.get("cancelled_count") or 0)
         task["failure_count"] = int(report.get("failure_count") or 0)
         task["retryable_count"] = int(report.get("batch_retryable_count") or 0)
 
@@ -808,11 +1042,13 @@ class TaskProcessor:
         return "；".join(snippets) + suffix
 
     def retry_task(self, task_id: str) -> dict[str, Any]:
-        """Reset a failed or canceled task and run it again."""
+        """Reset a failed, canceled, or interrupted task and run it again."""
         self._assert_permission("tasks.control")
         task = self.store.get_task(task_id)
         if not task:
             raise KeyError(f"Task not found: {task_id}")
+        if task.get("status") not in {"失败", "已取消", "已中断"}:
+            raise ValueError("只有失败、已取消或已中断的任务可以重试")
         task["status"] = "待处理"
         task["progress"] = 0
         task["error_message"] = ""
@@ -875,7 +1111,10 @@ class TaskProcessor:
         if not settings.get("allowTaskStatusCloudSync", False):
             raise ValueError("任务状态同步云端未授权")
         status = self._local_sync_status(str(payload.get("status") or payload.get("task_status") or task.get("status") or ""))
-        progress = min(100, self._non_negative_int(payload.get("progress", task.get("progress", 0)), int(task.get("progress", 0) or 0)))
+        current_status = str(task.get("status") or "")
+        current_progress = int(task.get("progress", 0) or 0)
+        reported_progress = min(100, self._non_negative_int(payload.get("progress", current_progress), current_progress))
+        progress = max(current_progress, reported_progress)
         if status == "成功":
             progress = 100
         message = str(payload.get("message") or payload.get("error_message") or "")
@@ -883,8 +1122,23 @@ class TaskProcessor:
         dry_run_execution = self._local_sync_dry_run_execution(
             payload.get("dryRunExecution") or payload.get("dry_run_execution") or payload.get("execution_summary")
         )
+        native_execution_report = self._local_sync_native_execution_report(
+            payload.get("nativeExecutionReport") or payload.get("native_execution_report")
+        )
         if dry_run_execution:
             self._validate_local_sync_execution_task(task, dry_run_execution)
+        if native_execution_report:
+            self._validate_local_sync_execution_task(task, native_execution_report)
+        self._validate_local_sync_transition(current_status, status)
+        reconciled_report = self._reconcile_pending_local_outputs(
+            task,
+            status,
+            outputs,
+            native_execution_report,
+            message,
+        )
+        if reconciled_report:
+            self._apply_task_report_summary(task, reconciled_report)
         now = utc_now()
         task["status"] = status
         task["progress"] = progress
@@ -893,6 +1147,8 @@ class TaskProcessor:
         task["local_client_outputs"] = outputs
         if dry_run_execution:
             task["local_execution_summary"] = dry_run_execution
+        if native_execution_report:
+            task["local_native_execution_report"] = native_execution_report
         task["local_synced_at"] = now
         if payload.get("output_path"):
             task["output_path"] = str(payload.get("output_path") or "")
@@ -906,6 +1162,9 @@ class TaskProcessor:
             "dry_run_execution_status": dry_run_execution.get("plan_status", "") if dry_run_execution else "",
             "dry_run_ready_action_count": dry_run_execution.get("ready_action_count", 0) if dry_run_execution else 0,
             "dry_run_blocked_action_count": dry_run_execution.get("blocked_action_count", 0) if dry_run_execution else 0,
+            "native_execution_status": native_execution_report.get("status", "") if native_execution_report else "",
+            "native_execution_performed": bool(native_execution_report.get("native_execution_performed")) if native_execution_report else False,
+            "native_successful_action_count": native_execution_report.get("successful_action_count", 0) if native_execution_report else 0,
             "synced_at": now,
         }
         if status in {"成功", "失败", "已取消"}:
@@ -916,6 +1175,24 @@ class TaskProcessor:
             task["error_message"] = ""
         self.store.append_log(task_id, f"本地客户端同步状态：{status} {progress}% {message}".strip())
         return self.store.save_task(task)
+
+    @staticmethod
+    def _validate_local_sync_transition(current_status: str, next_status: str) -> None:
+        """Reject local-client state regressions and control-endpoint bypasses."""
+        terminal_statuses = {"成功", "失败", "已取消"}
+        if current_status in terminal_statuses and next_status != current_status:
+            raise ValueError(f"终态任务不能从{current_status}同步改写为{next_status}")
+        allowed = {
+            "待处理": {"待处理", "处理中", "成功", "失败", "已暂停", "已取消", "已中断"},
+            "处理中": {"处理中", "成功", "失败", "已暂停", "已取消", "已中断"},
+            "已暂停": {"已暂停"},
+            "已中断": {"已中断"},
+            "成功": {"成功"},
+            "失败": {"失败"},
+            "已取消": {"已取消"},
+        }
+        if next_status not in allowed.get(current_status, set()):
+            raise ValueError(f"本地任务状态不能从{current_status}同步转换为{next_status}")
 
     @staticmethod
     def _validate_local_sync_execution_task(task: dict[str, Any], execution: dict[str, Any]) -> None:
@@ -958,8 +1235,8 @@ class TaskProcessor:
             return mapped
         raise ValueError("本地任务状态不支持")
 
-    @staticmethod
-    def _local_sync_outputs(outputs: Any) -> list[dict[str, Any]]:
+    @classmethod
+    def _local_sync_outputs(cls, outputs: Any) -> list[dict[str, Any]]:
         """Sanitize local-client output summaries before persisting them."""
         if not isinstance(outputs, list):
             return []
@@ -967,17 +1244,212 @@ class TaskProcessor:
         for item in outputs[:50]:
             if not isinstance(item, dict):
                 continue
+            raw_sha256 = str(item.get("sha256") or item.get("checksum") or "").strip()
+            sha256 = cls._safe_sha256(raw_sha256)
+            if raw_sha256 and not sha256:
+                raise ValueError("本地客户端输出 SHA-256 格式无效")
+            raw_size = item.get("size", "")
+            size_text = str(raw_size).strip()
+            if size_text and not re.fullmatch(r"\d+", size_text):
+                raise ValueError("本地客户端输出大小格式无效")
+            size = int(size_text) if size_text else ""
             cleaned.append(
                 {
+                    "file_id": str(item.get("file_id") or "")[:80],
                     "name": str(item.get("name") or item.get("file_name") or Path(str(item.get("path") or "")).name),
                     "path": str(item.get("path") or ""),
                     "output_type": str(item.get("output_type") or item.get("type") or ""),
                     "status": str(item.get("status") or "已生成"),
-                    "size": item.get("size", ""),
+                    "size": size,
+                    "sha256": sha256,
                     "message": str(item.get("message") or ""),
                 }
             )
         return cleaned
+
+    def _reconcile_pending_local_outputs(
+        self,
+        task: dict[str, Any],
+        status: str,
+        outputs: list[dict[str, Any]],
+        native_execution_report: dict[str, Any],
+        message: str,
+    ) -> dict[str, Any]:
+        """Resolve pending local artifacts from verified success, failure, or cancellation."""
+        reports = [report for report in self.store.list_reports() if report.get("task_id") == task.get("id")]
+        report = reports[0] if reports else {}
+        artifacts = list((report.get("analysis") or {}).get("artifacts") or [])
+        pending = [item for item in artifacts if item.get("status") == "待本地客户端执行"]
+        if not pending or status not in {"成功", "失败", "已取消"}:
+            return {}
+        if status == "已取消":
+            cancellation_message = message or "本地 Office 转换已取消"
+            for artifact in pending:
+                artifact.update(
+                    {
+                        "status": "local_execution_cancelled",
+                        "message": cancellation_message,
+                        "native_execution_verified": False,
+                    }
+                )
+            return self._refresh_reconciled_report(report)
+        if status == "失败":
+            native_actions = native_execution_report.get("actions") if isinstance(native_execution_report.get("actions"), list) else []
+            failed_action = next(
+                (
+                    item
+                    for item in native_actions
+                    if isinstance(item, dict) and item.get("type") == "office_conversion" and item.get("status") == "failed"
+                ),
+                {},
+            )
+            failure_message = str(failed_action.get("message") or message or "本地 Office 客户端回传转换失败")
+            for artifact in pending:
+                artifact.update(
+                    {
+                        "status": "local_execution_failed",
+                        "message": failure_message,
+                        "native_execution_verified": bool(failed_action),
+                    }
+                )
+            return self._refresh_reconciled_report(report)
+        native_actions = native_execution_report.get("actions") if isinstance(native_execution_report.get("actions"), list) else []
+        office_success = any(
+            item.get("type") == "office_conversion"
+            and item.get("status") == "success"
+            and item.get("native_execution_performed")
+            for item in native_actions
+            if isinstance(item, dict)
+        )
+        if not office_success:
+            raise ValueError("待本地 Office 输出不能仅凭任务状态标记成功，需要原生 office_conversion 执行证据")
+        matched_outputs: set[int] = set()
+        pending_by_type: dict[str, int] = {}
+        for item in pending:
+            output_type = str(item.get("output_type") or "").lower()
+            pending_by_type[output_type] = pending_by_type.get(output_type, 0) + 1
+        output_root = self.store.output_task_dir(str(task.get("id") or "")).resolve()
+        for artifact in pending:
+            output_type = str(artifact.get("output_type") or "").lower()
+            file_id = str(artifact.get("file_id") or "")
+            candidates = [
+                (index, output)
+                for index, output in enumerate(outputs)
+                if index not in matched_outputs
+                and str(output.get("output_type") or Path(str(output.get("name") or "")).suffix.lstrip(".")).lower() == output_type
+                and (not output.get("file_id") or str(output.get("file_id")) == file_id)
+            ]
+            if pending_by_type.get(output_type, 0) > 1:
+                candidates = [(index, output) for index, output in candidates if str(output.get("file_id") or "") == file_id]
+            if len(candidates) != 1:
+                raise ValueError(f"待本地执行文件 {artifact.get('source_file', file_id)} 缺少唯一可验证的 {output_type} 输出")
+            output_index, output = candidates[0]
+            output_path = Path(str(output.get("path") or ""))
+            if not output_path.exists() or not output_path.is_file():
+                raise ValueError(f"本地客户端回传输出不存在：{output.get('name') or output_type}")
+            resolved = output_path.resolve()
+            try:
+                resolved.relative_to(output_root)
+            except ValueError as exc:
+                raise ValueError("本地客户端回传输出不在受管任务目录") from exc
+            attempt_started_at_ns = int(task.get("attempt_started_at_ns") or 0)
+            if attempt_started_at_ns and resolved.stat().st_mtime_ns < attempt_started_at_ns:
+                raise ValueError(f"本地客户端回传输出早于当前任务轮次：{output.get('name') or output_type}")
+            validation_error = self._output_artifact_validation_error(resolved, output_type)
+            if validation_error:
+                raise ValueError(f"本地客户端回传输出校验失败：{validation_error}")
+            declared_size = output.get("size", "")
+            if declared_size == "":
+                raise ValueError(f"本地客户端回传输出缺少文件大小：{output.get('name') or output_type}")
+            actual_size = resolved.stat().st_size
+            if int(declared_size) != actual_size:
+                raise ValueError(f"本地客户端回传输出文件大小不匹配：{output.get('name') or output_type}")
+            declared_sha256 = str(output.get("sha256") or "")
+            if not declared_sha256:
+                raise ValueError(f"本地客户端回传输出缺少 SHA-256：{output.get('name') or output_type}")
+            actual_sha256 = self._sha256(resolved)
+            if declared_sha256 != actual_sha256:
+                raise ValueError(f"本地客户端回传输出 SHA-256 不匹配：{output.get('name') or output_type}")
+            matched_outputs.add(output_index)
+            artifact.update(
+                {
+                    "file_name": resolved.name,
+                    "path": str(resolved),
+                    "url": f"/api/artifacts/{task['id']}/{resolved.name}",
+                    "status": "成功",
+                    "message": "本地 Office 客户端已回传并验证转换产物",
+                    "size": actual_size,
+                    "sha256": actual_sha256,
+                    "native_execution_verified": True,
+                }
+            )
+        return self._refresh_reconciled_report(report)
+
+    def _refresh_reconciled_report(self, report: dict[str, Any]) -> dict[str, Any]:
+        """Refresh report counts and presentation after pending artifacts reach a terminal state."""
+        artifacts = list((report.get("analysis") or {}).get("artifacts") or [])
+        pending = [item for item in artifacts if item.get("status") == "待本地客户端执行"]
+        cancelled = [item for item in artifacts if item.get("status") == "local_execution_cancelled"]
+        failures = [
+            item
+            for item in artifacts
+            if item.get("status") not in {"成功", "跳过", "待本地客户端执行", "local_execution_cancelled"}
+        ]
+        validation_failed_ids = {
+            str(item.get("id") or "")
+            for item in report.get("files") or []
+            if item.get("validation_errors")
+        }
+        artifact_failed_ids = {str(item.get("file_id") or "") for item in failures if item.get("file_id")}
+        image_failed_ids = {
+            str(item.get("file_id") or "")
+            for item in (report.get("analysis") or {}).get("imageExtractionErrors") or []
+            if item.get("file_id")
+        }
+        failed_ids = {file_id for file_id in validation_failed_ids | artifact_failed_ids | image_failed_ids if file_id}
+        pending_ids = {str(item.get("file_id") or "") for item in pending if item.get("file_id")}
+        cancelled_ids = {str(item.get("file_id") or "") for item in cancelled if item.get("file_id")}
+        report["artifact_count"] = sum(1 for item in artifacts if item.get("status") == "成功")
+        report["artifact_failure_count"] = len(failures)
+        report["artifact_pending_count"] = len(pending)
+        report["artifact_cancelled_count"] = len(cancelled)
+        report["failed_file_ids"] = sorted(failed_ids)
+        report["fail_count"] = len(failed_ids)
+        report["pending_file_ids"] = sorted(pending_ids - failed_ids)
+        report["pending_count"] = len(report["pending_file_ids"])
+        report["cancelled_file_ids"] = sorted(cancelled_ids - failed_ids - pending_ids)
+        report["cancelled_count"] = len(report["cancelled_file_ids"])
+        report["success_count"] = max(
+            0,
+            len(report.get("files") or [])
+            - int(report.get("fail_count") or 0)
+            - report["pending_count"]
+            - report["cancelled_count"],
+        )
+        report["error_count"] = report["fail_count"]
+        for item in report.get("qualityChecks") or []:
+            if item.get("id") == "conversion_output":
+                item.update(
+                    {
+                        "status": "失败" if failures else ("需确认" if pending or cancelled else "通过"),
+                        "severity": "error" if failures else ("warning" if pending or cancelled else "info"),
+                        "metric": f"成功 {report['artifact_count']} 个，待本地执行 {len(pending)} 个，已取消 {len(cancelled)} 个，失败 {len(failures)} 个",
+                        "message": "本地 Office 转换已取消" if cancelled else ("本地 Office 输出已验证并登记" if not pending and not failures else item.get("message", "")),
+                        "recommendation": "如需产物可重新发起转换" if cancelled else ("可下载转换结果" if not pending and not failures else item.get("recommendation", "")),
+                    }
+                )
+        report["quality_issue_count"] = sum(1 for item in report.get("qualityChecks") or [] if item.get("status") != "通过")
+        report["quality_blocker_count"] = sum(1 for item in report.get("qualityChecks") or [] if item.get("status") == "失败")
+        report["failureRows"] = self.report_builder._failure_rows(report)
+        report["failure_count"] = len(report["failureRows"])
+        report["qualitySummary"] = self.report_builder._quality_summary(
+            list(report.get("files") or []),
+            dict(report.get("analysis") or {}),
+            report,
+        )
+        report["summary"] = self.report_builder._summary(report)
+        refreshed = self.report_builder.rewrite(report)
+        return self.store.save_report(refreshed)
 
     @staticmethod
     def _local_sync_dry_run_execution(value: Any) -> dict[str, Any]:
@@ -1034,6 +1506,89 @@ class TaskProcessor:
             "actions": actions,
             "path_policy": "no local file paths or tokens are stored",
         }
+
+    @staticmethod
+    def _local_sync_native_execution_report(value: Any) -> dict[str, Any]:
+        """Sanitize a real native execution report from the local desktop client."""
+        if not isinstance(value, dict):
+            return {}
+        raw_actions = value.get("actions") if isinstance(value.get("actions"), list) else []
+        actions: list[dict[str, Any]] = []
+        safe_capabilities = set(LOCAL_CLIENT_CAPABILITY_LABELS)
+        safe_actions = set(LOCAL_ACTION_LABELS)
+        for item in raw_actions[:20]:
+            if not isinstance(item, dict):
+                continue
+            action_type = str(item.get("type") or "")[:80]
+            if action_type not in safe_actions:
+                continue
+            raw_capabilities = item.get("required_capabilities") if isinstance(item.get("required_capabilities"), list) else []
+            capabilities = [
+                {
+                    "key": str(capability.get("key") or "")[:80],
+                    "label": str(capability.get("label") or capability.get("key") or "")[:80],
+                    "available": bool(capability.get("available")),
+                }
+                for capability in raw_capabilities
+                if isinstance(capability, dict) and str(capability.get("key") or "") in safe_capabilities
+            ]
+            action_status = TaskProcessor._native_execution_status(str(item.get("status") or item.get("native_status") or ""))
+            native_performed = bool(item.get("native_execution_performed")) and action_status == "success"
+            actions.append(
+                {
+                    "action_id": str(item.get("action_id") or "")[:120],
+                    "type": action_type,
+                    "label": str(item.get("label") or LOCAL_ACTION_LABELS.get(action_type, action_type))[:120],
+                    "status": action_status,
+                    "native_execution_performed": native_performed,
+                    "platform": normalize_platform(str(item.get("platform") or value.get("platform") or "")),
+                    "required_capabilities": capabilities,
+                    "step_count": TaskProcessor._non_negative_int(item.get("step_count"), 0),
+                    "successful_step_count": TaskProcessor._non_negative_int(item.get("successful_step_count"), 0),
+                    "output_artifact_types": [str(artifact)[:40] for artifact in item.get("output_artifact_types") or [] if isinstance(artifact, str)][:12],
+                    "message": TaskProcessor._redact_local_path_text(str(item.get("message") or ""))[:240],
+                }
+            )
+        successful = [action for action in actions if action["native_execution_performed"] and action["status"] == "success"]
+        return {
+            "schema_version": "k12.localNativeExecutionReport.v1",
+            "task": {
+                "id": str((value.get("task") or {}).get("id") or "")[:80] if isinstance(value.get("task"), dict) else "",
+                "task_type": str((value.get("task") or {}).get("task_type") or "")[:80] if isinstance(value.get("task"), dict) else "",
+                "task_label": str((value.get("task") or {}).get("task_label") or "")[:120] if isinstance(value.get("task"), dict) else "",
+            },
+            "client_id": str(value.get("client_id") or "")[:120],
+            "platform": normalize_platform(str(value.get("platform") or "")),
+            "status": "success" if successful and len(successful) == len(actions) else ("partial_success" if successful else "no_native_success"),
+            "native_execution_performed": bool(successful),
+            "action_count": len(actions),
+            "successful_action_count": len(successful),
+            "actions": actions,
+            "path_policy": "no local file paths or tokens are stored",
+        }
+
+    @staticmethod
+    def _native_execution_status(status: str) -> str:
+        """Normalize local-client native execution result statuses."""
+        normalized = str(status or "").strip()
+        aliases = {
+            "completed": "success",
+            "complete": "success",
+            "success": "success",
+            "succeeded": "success",
+            "成功": "success",
+            "failed": "failed",
+            "failure": "failed",
+            "error": "failed",
+            "失败": "failed",
+            "skipped": "skipped",
+            "跳过": "skipped",
+            "blocked": "blocked",
+            "阻断": "blocked",
+            "pending": "pending",
+            "等待": "pending",
+        }
+        return aliases.get(normalized.lower(), aliases.get(normalized, normalized[:80] or "unknown"))
 
     def recover_interrupted_tasks(self) -> dict[str, Any]:
         """Mark in-flight tasks as recoverable after a service restart."""
@@ -1128,16 +1683,25 @@ class TaskProcessor:
         return LOCAL_PATH_TEXT.sub(replacement, text)
 
     def cancel_task(self, task_id: str) -> dict[str, Any]:
-        """Cancel a task that has not already completed successfully."""
+        """Cancel a task that has not reached a terminal state."""
         self._assert_permission("tasks.control")
         task = self.store.get_task(task_id)
         if not task:
             raise KeyError(f"Task not found: {task_id}")
-        if task["status"] == "成功":
-            return task
+        if task.get("status") in {"成功", "失败", "已取消"}:
+            raise ValueError("成功、失败或已取消的终态任务不能取消")
         task["status"] = "已取消"
         task["progress"] = min(task.get("progress", 0), 99)
         task["end_time"] = utc_now()
+        reconciled_report = self._reconcile_pending_local_outputs(
+            task,
+            "已取消",
+            [],
+            {},
+            "用户取消待本地 Office 执行任务",
+        )
+        if reconciled_report:
+            self._apply_task_report_summary(task, reconciled_report)
         self.store.append_log(task_id, "用户取消任务", "warning")
         return self.store.save_task(task)
 
@@ -1198,11 +1762,26 @@ class TaskProcessor:
         path = Path(file.get("storage_path") or file.get("file_path") or "")
         if not path.exists() or not path.is_file():
             raise ValueError("文件源不存在，无法下载")
+        resolved = path.resolve()
+        managed_source = str(file.get("source_kind") or "") in {"upload", "archive_entry"}
+        if managed_source:
+            try:
+                resolved.relative_to(self.store.uploads_dir.resolve())
+            except ValueError as exc:
+                raise ValueError("受管上传文件路径越界，已拒绝下载") from exc
+        download_path = resolved if managed_source else path
+        declared_size = int(file.get("file_size") or 0)
+        declared_sha256 = str(file.get("source_sha256") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", declared_sha256):
+            raise ValueError("文件源缺少有效完整性哈希，已拒绝下载")
+        if download_path.stat().st_size != declared_size or self._sha256(download_path) != declared_sha256:
+            raise ValueError("文件源内容与登记记录不一致，已拒绝下载")
         return {
-            "path": path,
-            "file_name": file.get("file_name") or path.name,
+            "path": download_path,
+            "file_name": file.get("file_name") or download_path.name,
             "file_type": file.get("file_type", ""),
-            "file_size": path.stat().st_size,
+            "file_size": declared_size,
+            "sha256": declared_sha256,
         }
 
     def _artifact_file_item(self, path: Path, artifact: dict[str, Any]) -> dict[str, Any]:
@@ -1270,8 +1849,8 @@ class TaskProcessor:
         task = self.store.get_task(task_id)
         if not task:
             raise KeyError(f"Task not found: {task_id}")
-        if task["status"] in {"成功", "已取消"}:
-            return task
+        if task.get("status") not in {"待处理", "处理中"}:
+            raise ValueError("只有待处理或处理中的任务可以暂停")
         task["status"] = "已暂停"
         task["progress"] = min(task.get("progress", 0), 99)
         task["end_time"] = utc_now()
@@ -1284,8 +1863,8 @@ class TaskProcessor:
         task = self.store.get_task(task_id)
         if not task:
             raise KeyError(f"Task not found: {task_id}")
-        if task["status"] not in {"已暂停", "已中断"}:
-            return task
+        if task.get("status") not in {"已暂停", "已中断"}:
+            raise ValueError("只有已暂停或已中断的任务可以继续")
         previous_status = task["status"]
         task["status"] = "待处理"
         task["progress"] = 0
@@ -1318,7 +1897,7 @@ class TaskProcessor:
                 continue
             seen.add(key)
             file = files.get(file_id) or self.store.get_file(file_id) or {}
-            target_path = Path(str(file.get("storage_path") or file.get("file_path") or ""))
+            target_path = self._original_source_path(file)
             result = {
                 "file_id": file_id,
                 "file_name": file.get("file_name", ""),
@@ -1334,7 +1913,14 @@ class TaskProcessor:
                     raise FileNotFoundError("备份文件不存在")
                 if not target_path.exists() or not target_path.is_file():
                     raise FileNotFoundError("原文件路径不存在，无法恢复")
-                shutil.copy2(resolved_backup, target_path)
+                declared_size = macro.get("backup_size", "")
+                declared_sha256 = str(macro.get("backup_sha256") or "")
+                if declared_size == "" or not re.fullmatch(r"[0-9a-f]{64}", declared_sha256):
+                    raise ValueError("宏备份缺少有效完整性记录")
+                backup_data = resolved_backup.read_bytes()
+                if len(backup_data) != int(declared_size) or hashlib.sha256(backup_data).hexdigest() != declared_sha256:
+                    raise ValueError("宏备份内容与登记记录不一致")
+                target_path.write_bytes(backup_data)
                 result["status"] = "成功"
                 result["message"] = "已从宏执行前备份恢复"
                 self.store.append_log(task_id, f"恢复宏备份：{file.get('file_name', file_id)}", category="macro")
@@ -1953,6 +2539,11 @@ class TaskProcessor:
         if task_type in LOCAL_REQUIRED_TASKS:
             return "local"
         files = [self.store.get_file(file_id) for file_id in file_ids]
+        if task_type in {"word_to_ppt", "ppt_to_word", "excel_to_pdf", "excel_to_word", "excel_to_ppt"} and any(
+            file and bool((file.get("content_summary") or {}).get("requiresNativeOffice"))
+            for file in files
+        ):
+            return "local"
         if task_type == "pdf_to_word" and (
             self.store.get_settings().get("enableFormulaOcr", True) or any(file and file.get("has_formula") for file in files)
         ):
@@ -2074,7 +2665,7 @@ class TaskProcessor:
                     "OCR 与图片",
                     "Mathpix、PaddleOCR、Tesseract、OpenCV、Pillow",
                     "contract",
-                    f"PDF 转 Word 默认 Mathpix，外部上传授权 {('已开启' if settings.get('allowExternalMathpixUpload') else '未开启')}；图片检索已有本地报告合同",
+                    f"纯文本 PDF 本地转换；扫描、混合和复杂 PDF 使用 Mathpix，外部上传授权 {('已开启' if settings.get('allowExternalMathpixUpload') else '未开启')}；图片检索已有本地报告合同",
                 ),
                 self._architecture_layer(
                     "formula_macro",
@@ -2136,7 +2727,7 @@ class TaskProcessor:
             self._api_endpoint("GET", "/api/tasks/{task_id}/local-payload", "本地任务载荷", "configured-token", "交付本地路径、预检、动作队列和同步策略", True),
             self._api_endpoint("GET", "/api/tasks/{task_id}/local-readiness", "本地客户端就绪状态", "token" if token_required else "local", "返回当前任务所需本地能力、脱敏预检缺口和 platform_mismatch 同平台 MathType/Office 交付阻断"),
             self._api_endpoint("POST", "/api/tasks/{task_id}/local-launch", "本地客户端启动请求", "configured-token + launch-authorization", "记录网页端唤起本地客户端请求并返回 k12-local 协议 URL", True),
-            self._api_endpoint("POST", "/api/tasks/{task_id}/local-sync", "本地状态同步", "token + sync-authorization", "接收本地客户端进度、输出摘要和上传意图", True),
+            self._api_endpoint("POST", "/api/tasks/{task_id}/local-sync", "本地状态同步", "token + sync-authorization", "接收本地客户端进度、输出摘要、dry-run 摘要、脱敏原生执行报告和上传意图", True),
             self._api_endpoint("GET", "/api/local-client/manifest", "本地客户端运行清单", "token" if token_required else "local", "返回本地客户端启动、心跳、载荷和同步接口合同"),
             self._api_endpoint("GET", "/api/local-client/uploads", "本地结果上传队列", "token" if token_required else "local", "返回本地结果上传意图、授权状态和脱敏输出摘要", True),
             self._api_endpoint("GET", "/api/local-client/uploads/{upload_id}/manifest", "本地结果云端接收清单", "token" if token_required else "local", "返回上传包哈希、输出摘要和云端接收合同，不包含本地路径或文件内容", True),
@@ -2175,7 +2766,7 @@ class TaskProcessor:
             self._api_endpoint("GET", "/api/logs", "日志列表", "token" if token_required else "local", "返回全局或任务日志"),
             self._api_endpoint("GET", "/api/logs/download", "日志导出", "token" if token_required else "local", "按 TXT/LOG/CSV/JSON 导出日志"),
             self._api_endpoint("GET", "/api/settings", "设置读取", "token" if token_required else "local", "读取系统设置；pdfToWordEngine 固定归一为 Mathpix"),
-            self._api_endpoint("PUT", "/api/settings", "设置保存", "token" if token_required else "local", "保存转换、OCR、宏、本地连接和安全设置；PDF 转 Word 引擎固定 Mathpix，外部上传授权仅来自 settings.allowExternalMathpixUpload", True, "settings.manage"),
+            self._api_endpoint("PUT", "/api/settings", "设置保存", "token" if token_required else "local", "保存转换、OCR、宏、本地连接和安全设置；纯文本 PDF 本地解析，复杂 PDF 的 OCR 引擎固定 Mathpix，外部上传授权仅来自 settings.allowExternalMathpixUpload", True, "settings.manage"),
             self._api_endpoint("GET", "/api/capabilities", "能力位", "token" if token_required else "local", "返回本地客户端、Office、MathType、宏和隐私能力"),
             self._api_endpoint("GET", "/api/install-profile", "安装画像", "token" if token_required else "local", "按 Windows/macOS 返回安装包、组件和 MathType 兼容提示"),
             self._api_endpoint("GET", "/api/install-plan", "安装计划", "token" if token_required else "local", "按 Windows/macOS 返回安装包状态、校验、安装步骤、心跳平台匹配和 MathType 同平台兜底策略"),
@@ -2184,7 +2775,7 @@ class TaskProcessor:
                 "/api/installers/{file_name}",
                 "安装包下载",
                 "token" if token_required else "local",
-                "仅当本地 installers 目录存在注册的 Windows .msi 或 macOS .pkg 安装包时下载，并返回平台、包边界、公式对象同平台边界、兜底格式和 SHA256 响应头",
+                "仅当本地 installers 目录存在注册的 Windows .msi 或 macOS .pkg 安装包，且请求显式携带 platform=Windows 或 platform=macOS 时下载，并返回平台、包边界、公式对象同平台边界、兜底格式和 SHA256 响应头",
                 True,
                 response_headers=[
                     {"name": "X-K12-Platform", "description": "Windows 或 macOS 安装目标平台"},
@@ -2343,6 +2934,10 @@ class TaskProcessor:
                     ("omml_target_path", "string", "复制到的目标路径"),
                     ("found_status", "string", "已找到 / 未找到 / 手动选择"),
                     ("copy_status", "string", "成功 / 失败 / 跳过"),
+                    ("source_size", "number", "依赖源快照字节数"),
+                    ("source_sha256", "string", "依赖源快照 SHA-256"),
+                    ("target_size", "number", "复制目标字节数"),
+                    ("target_sha256", "string", "复制目标 SHA-256"),
                     ("error_message", "string", "错误信息"),
                     ("created_at", "datetime", "创建时间"),
                 ],
@@ -2498,6 +3093,7 @@ class TaskProcessor:
         pdf_ocr_probe = self._pdf_ocr_contract_probe()
         pdf_retention_probe = self._pdf_retention_probe()
         pdf_formula_handoff_probe = self._pdf_formula_handoff_probe()
+        file_validation_probe = self._file_validation_probe()
         omml_dependency_probe = self._omml_dependency_probe()
         ppt_formula_probe = self._ppt_formula_probe()
         macro_batch_probe = self._macro_batch_sequence_probe()
@@ -2511,19 +3107,27 @@ class TaskProcessor:
         local_api_security_probe = self._local_api_security_probe()
         local_result_upload_probe = self._local_result_upload_probe()
         local_file_action_probe = self._local_file_action_execution_probe()
+        local_install_probe = self._local_install_platform_probe()
+        native_execution_evidence = self._local_native_acceptance_evidence(tasks)
         token_configured = bool(str(settings.get("localSecurityToken") or "").strip())
         has_word_to_ppt = "word_to_ppt" in task_types or "word_to_ppt" in report_types
         has_ppt_to_word = "ppt_to_word" in task_types or "ppt_to_word" in report_types
         conversion_probes = self._conversion_capability_probes()
         word_to_ppt_probe = conversion_probes["word_to_ppt"]
         ppt_to_word_probe = conversion_probes["ppt_to_word"]
+        pdf_to_word_probe = conversion_probes["pdf_to_word"]
         word_to_ppt_ready = has_word_to_ppt or bool(word_to_ppt_probe.get("available"))
         ppt_to_word_ready = has_ppt_to_word or bool(ppt_to_word_probe.get("available"))
         has_pdf_to_word = "pdf_to_word" in task_types or "pdf_to_word" in report_types
-        has_completed_pdf_to_word = any(
+        has_completed_mathpix_pdf_to_word = any(
             job.get("status") == "completed"
             and any(output.get("type") == "docx" for output in job.get("outputs", []))
             for job in mathpix_queue.get("jobs", [])
+        )
+        has_completed_pdf_to_word = bool(pdf_to_word_probe.get("available")) or has_completed_mathpix_pdf_to_word
+        mathpix_real_evidence = self._mathpix_acceptance_evidence(mathpix_queue, reports)
+        pdf_formula_native_covered = bool(
+            mathpix_real_evidence.get("formula_ocr_available") and native_execution_evidence.get("pdf_formula_mathtype_available")
         )
         has_batch = "batch_process" in task_types or "batch_process" in report_types
         formula_formatting = bool(settings.get("enableMathTypeFormatting", True))
@@ -2539,8 +3143,22 @@ class TaskProcessor:
                     self._acceptance_item("17.1.4", "支持 PDF 拖拽上传", "good", "已覆盖", "上传接口、拖拽区和 PDF 类型识别已接入", current=self._acceptance_current("PDF", file_types)),
                     self._acceptance_item("17.1.5", "支持批量上传", "good", "已覆盖", "多文件、文件夹和 ZIP 导入会生成文件队列", current=f"当前文件 {len(files)} 个"),
                     self._acceptance_item("17.1.6", "格式错误有提示", "good", "已覆盖", "文件校验会记录不支持格式和文件头异常"),
-                    self._acceptance_item("17.1.7", "文件损坏有提示", "good", "已覆盖", "预览和分析阶段会写入 validation_errors"),
-                    self._acceptance_item("17.1.8", "加密文件有提示", "good", "已覆盖", "加密 Word/PDF 会标记并提示登记密码"),
+                    self._acceptance_item(
+                        "17.1.7",
+                        "文件损坏有提示",
+                        "good" if file_validation_probe.get("corrupt_available") else "warn",
+                        "已覆盖" if file_validation_probe.get("corrupt_available") else "自检失败",
+                        str(file_validation_probe.get("corrupt_evidence") or file_validation_probe.get("evidence") or "预览和分析阶段会写入 validation_errors"),
+                        current=str(file_validation_probe.get("current") or ""),
+                    ),
+                    self._acceptance_item(
+                        "17.1.8",
+                        "加密文件有提示",
+                        "good" if file_validation_probe.get("encrypted_available") else "warn",
+                        "已覆盖" if file_validation_probe.get("encrypted_available") else "自检失败",
+                        str(file_validation_probe.get("encrypted_evidence") or file_validation_probe.get("evidence") or "加密 Word/PDF 会标记并提示登记密码"),
+                        current=str(file_validation_probe.get("current") or ""),
+                    ),
                     self._acceptance_item("17.1.9", "文件列表展示完整", "good", "已覆盖", "文件表格展示名称、类型、大小、公式、OMML、宏和状态"),
                 ],
             ),
@@ -2604,10 +3222,10 @@ class TaskProcessor:
                     self._acceptance_item(
                         "17.3.3",
                         "用户选择转换后，系统应执行 OMML 转 MathType",
-                        "warn",
-                        "合同覆盖" if omml_handoff_probe.get("handoff_available") else "自检失败",
-                        str(omml_handoff_probe.get("handoff_evidence") or omml_handoff_probe.get("evidence") or "本地任务载荷会下发 omml_mathtype 动作和桌面执行计划，真实写回需桌面端"),
-                        current=str(omml_handoff_probe.get("current") or "OMML 转 MathType 交接自检未运行"),
+                        "good" if native_execution_evidence.get("omml_mathtype_available") else "warn",
+                        "已覆盖" if native_execution_evidence.get("omml_mathtype_available") else ("合同覆盖" if omml_handoff_probe.get("handoff_available") else "自检失败"),
+                        str(native_execution_evidence.get("omml_evidence") or omml_handoff_probe.get("handoff_evidence") or omml_handoff_probe.get("evidence") or "本地任务载荷会下发 omml_mathtype 动作和桌面执行计划，真实写回需桌面端"),
+                        current=str(native_execution_evidence.get("omml_current") or omml_handoff_probe.get("current") or "OMML 转 MathType 交接自检未运行"),
                     ),
                     self._acceptance_item(
                         "17.3.4",
@@ -2628,10 +3246,10 @@ class TaskProcessor:
                     self._acceptance_item(
                         "17.3.6",
                         "复制成功后，应重新执行公式转换",
-                        "warn",
-                        "合同覆盖" if omml_handoff_probe.get("retry_available") else "自检失败",
-                        str(omml_handoff_probe.get("retry_evidence") or omml_handoff_probe.get("evidence") or "重新转换动作会进入本地客户端队列"),
-                        current=str(omml_handoff_probe.get("current") or "OMML 重试交接自检未运行"),
+                        "good" if native_execution_evidence.get("omml_mathtype_available") else "warn",
+                        "已覆盖" if native_execution_evidence.get("omml_mathtype_available") else ("合同覆盖" if omml_handoff_probe.get("retry_available") else "自检失败"),
+                        str(native_execution_evidence.get("omml_retry_evidence") or omml_handoff_probe.get("retry_evidence") or omml_handoff_probe.get("evidence") or "重新转换动作会进入本地客户端队列"),
+                        current=str(native_execution_evidence.get("omml_current") or omml_handoff_probe.get("current") or "OMML 重试交接自检未运行"),
                     ),
                     self._acceptance_item("17.3.7", "如果无法自动找到 OMML 文件，应支持用户手动选择", "good", "已覆盖", "设置页和 OMML 校正支持手动路径"),
                     self._acceptance_item("17.3.8", "转换失败时，不得删除或破坏原公式", "good", "已覆盖", "失败策略为保留 OMML 或原公式"),
@@ -2664,10 +3282,10 @@ class TaskProcessor:
                     self._acceptance_item(
                         "17.4.5",
                         "系统可按顺序执行宏",
-                        "warn",
-                        "合同覆盖" if macro_order_probe.get("available") else "自检失败",
-                        str(macro_order_probe.get("evidence") or "网页端生成本地宏队列和桌面执行计划，真实执行只允许本地客户端"),
-                        current=str(macro_order_probe.get("current") or "宏顺序执行交接自检未运行"),
+                        "good" if native_execution_evidence.get("macro_sequence_available") else "warn",
+                        "已覆盖" if native_execution_evidence.get("macro_sequence_available") else ("合同覆盖" if macro_order_probe.get("available") else "自检失败"),
+                        str(native_execution_evidence.get("macro_evidence") or macro_order_probe.get("evidence") or "网页端生成本地宏队列和桌面执行计划，真实执行只允许本地客户端"),
+                        current=str(native_execution_evidence.get("macro_current") or macro_order_probe.get("current") or "宏顺序执行交接自检未运行"),
                     ),
                     self._acceptance_item("17.4.6", "宏执行前必须生成文档备份", "good" if macro_backup else "warn", "已覆盖" if macro_backup else "需开启", "宏备份策略和恢复入口已接入", current=f"当前备份{'开启' if macro_backup else '关闭'}"),
                     self._acceptance_item("17.4.7", "宏执行失败时支持停止、跳过或继续", "good", "已覆盖", "失败策略写入任务和报告", current=str(settings.get("macroFailureStrategy") or "跳过")),
@@ -2721,17 +3339,21 @@ class TaskProcessor:
                         "good" if has_completed_pdf_to_word else "warn",
                         "已覆盖" if has_completed_pdf_to_word else "合同覆盖",
                         "已有 Mathpix DOCX 完成记录，PDF 转 Word 产物进入标准输出"
-                        if has_completed_pdf_to_word
-                        else str(mathpix_contract_probe.get("evidence") or "PDF 转 Word 统一走 Mathpix DOCX 输出合同"),
-                        current=self._mathpix_contract_probe_current(has_pdf_to_word, has_completed_pdf_to_word, mathpix_contract_probe, mathpix_queue),
+                        if has_completed_mathpix_pdf_to_word
+                        else str(pdf_to_word_probe.get("evidence") or "文本型 PDF 本地转换自检未运行"),
+                        current=(
+                            self._mathpix_contract_probe_current(has_pdf_to_word, True, mathpix_contract_probe, mathpix_queue)
+                            if has_completed_mathpix_pdf_to_word
+                            else self._conversion_probe_current("pdf_to_word", has_pdf_to_word, pdf_to_word_probe)
+                        ),
                     ),
                     self._acceptance_item(
                         "17.6.2",
                         "扫描 PDF 可 OCR",
-                        "warn",
-                        "需 Mathpix 实测",
-                        str(pdf_ocr_probe.get("scanned_evidence") or pdf_ocr_probe.get("evidence") or "扫描型 PDF 会生成 Mathpix OCR 作业，外部上传需授权"),
-                        current=str(pdf_ocr_probe.get("scanned_current") or "扫描 PDF Mathpix 合同自检未运行"),
+                        "good" if mathpix_real_evidence.get("scanned_ocr_available") else "warn",
+                        "已覆盖" if mathpix_real_evidence.get("scanned_ocr_available") else "需 Mathpix 实测",
+                        str(mathpix_real_evidence.get("scanned_evidence") or pdf_ocr_probe.get("scanned_evidence") or pdf_ocr_probe.get("evidence") or "扫描型 PDF 会生成 Mathpix OCR 作业，外部上传需授权"),
+                        current=str(mathpix_real_evidence.get("scanned_current") or pdf_ocr_probe.get("scanned_current") or "扫描 PDF Mathpix 合同自检未运行"),
                     ),
                     self._acceptance_item(
                         "17.6.3",
@@ -2752,10 +3374,10 @@ class TaskProcessor:
                     self._acceptance_item(
                         "17.6.5",
                         "数学公式可识别",
-                        "warn",
-                        "需 Mathpix 实测",
-                        str(pdf_ocr_probe.get("formula_evidence") or pdf_ocr_probe.get("evidence") or "Mathpix tex.zip 公式结果会进入统一公式报告"),
-                        current=str(pdf_ocr_probe.get("formula_current") or "PDF 公式 OCR 合同自检未运行"),
+                        "good" if mathpix_real_evidence.get("formula_ocr_available") else "warn",
+                        "已覆盖" if mathpix_real_evidence.get("formula_ocr_available") else "需 Mathpix 实测",
+                        str(mathpix_real_evidence.get("formula_evidence") or pdf_ocr_probe.get("formula_evidence") or pdf_ocr_probe.get("evidence") or "Mathpix tex.zip 公式结果会进入统一公式报告"),
+                        current=str(mathpix_real_evidence.get("formula_current") or pdf_ocr_probe.get("formula_current") or "PDF 公式 OCR 合同自检未运行"),
                     ),
                     self._acceptance_item(
                         "17.6.6",
@@ -2785,10 +3407,10 @@ class TaskProcessor:
                     self._acceptance_item(
                         "17.7.2",
                         "Word 原生公式可转换为 MathType",
-                        "warn",
-                        "合同覆盖" if omml_handoff_probe.get("handoff_available") else "自检失败",
-                        str(omml_handoff_probe.get("handoff_evidence") or omml_handoff_probe.get("evidence") or "OMML 转 MathType 动作进入本地载荷"),
-                        current=str(omml_handoff_probe.get("current") or "OMML 转 MathType 交接自检未运行"),
+                        "good" if native_execution_evidence.get("omml_mathtype_available") else "warn",
+                        "已覆盖" if native_execution_evidence.get("omml_mathtype_available") else ("合同覆盖" if omml_handoff_probe.get("handoff_available") else "自检失败"),
+                        str(native_execution_evidence.get("omml_evidence") or omml_handoff_probe.get("handoff_evidence") or omml_handoff_probe.get("evidence") or "OMML 转 MathType 动作进入本地载荷"),
+                        current=str(native_execution_evidence.get("omml_current") or omml_handoff_probe.get("current") or "OMML 转 MathType 交接自检未运行"),
                     ),
                     self._acceptance_item(
                         "17.7.3",
@@ -2801,10 +3423,10 @@ class TaskProcessor:
                     self._acceptance_item(
                         "17.7.4",
                         "PDF 公式可识别并转换为 MathType",
-                        "warn",
-                        "需 Mathpix 实测",
-                        str(pdf_ocr_probe.get("formula_handoff_evidence") or "Mathpix 公式 OCR 结果会交给 PDF 公式 MathType 后处理动作；真实识别和对象写回仍需授权与桌面端实测"),
-                        current=str(pdf_ocr_probe.get("formula_handoff_current") or "PDF 公式识别与 MathType 转换仍需 Mathpix 授权和本地客户端实测"),
+                        "good" if pdf_formula_native_covered else "warn",
+                        "已覆盖" if pdf_formula_native_covered else ("需本地客户端实测" if mathpix_real_evidence.get("formula_ocr_available") else "需 Mathpix 实测"),
+                        str(native_execution_evidence.get("pdf_formula_evidence") if pdf_formula_native_covered else (mathpix_real_evidence.get("formula_handoff_evidence") or pdf_ocr_probe.get("formula_handoff_evidence") or "Mathpix 公式 OCR 结果会交给 PDF 公式 MathType 后处理动作；真实识别和对象写回仍需授权与桌面端实测")),
+                        current=str(native_execution_evidence.get("pdf_formula_current") if pdf_formula_native_covered else (mathpix_real_evidence.get("formula_handoff_current") or pdf_ocr_probe.get("formula_handoff_current") or "PDF 公式识别与 MathType 转换仍需 Mathpix 授权和本地客户端实测")),
                     ),
                     self._acceptance_item("17.7.5", "图片公式识别失败时保留原图", "good", "已覆盖", "失败公式保留原图引用和待确认状态"),
                     self._acceptance_item("17.7.6", "用户可在 Word 中选择 MathType 格式化公式", "good", "已覆盖", "设置页和公式工作区提供格式化参数"),
@@ -2864,7 +3486,17 @@ class TaskProcessor:
                 "17.10",
                 "本地 + 网页双模式验收",
                 [
-                    self._acceptance_item("17.10.1", "本地客户端可独立运行", "good", "已覆盖", "标准库本地伴随 CLI 可独立运行，支持 manifest、心跳、载荷领取、动作级 dry-run 校验和状态同步；真实桌面壳仍可后续打包"),
+                    self._acceptance_item(
+                        "17.10.1",
+                        "本地客户端可独立运行",
+                        "good" if local_install_probe.get("available") else "warn",
+                        "已覆盖" if local_install_probe.get("available") else "自检失败",
+                        (
+                            "标准库本地伴随 CLI 可独立运行，支持 manifest、心跳、载荷领取、动作级 dry-run 校验和状态同步；"
+                            f"{local_install_probe.get('evidence') or '安装画像自检未运行'}"
+                        ),
+                        current=str(local_install_probe.get("current") or "安装画像自检未运行；真实桌面壳仍可后续打包"),
+                    ),
                     self._acceptance_item("17.10.2", "网页端可独立访问", "good", "已覆盖", "静态前端和本地 API 可独立运行"),
                     self._acceptance_item("17.10.3", "网页端可创建任务", "good", "已覆盖", "任务创建接口和工作台入口已接入"),
                     self._acceptance_item("17.10.4", "系统可判断任务是否需要本地处理", "good", "已覆盖", "resolve_execute_mode 会按任务类型和文件能力分流"),
@@ -2873,13 +3505,20 @@ class TaskProcessor:
                     self._acceptance_item(
                         "17.10.7",
                         "本地客户端可执行 Office、MathType、OMML、Word 宏相关任务",
-                        "warn",
-                        "需本地客户端实测" if local_file_action_probe.get("available") else "自检失败",
+                        "good" if native_execution_evidence.get("all_native_actions_available") else "warn",
+                        (
+                            "已覆盖"
+                            if native_execution_evidence.get("all_native_actions_available")
+                            else ("部分实测" if native_execution_evidence.get("available_action_types") else ("需本地客户端实测" if local_file_action_probe.get("available") else "自检失败"))
+                        ),
                         str(
-                            local_file_action_probe.get("evidence")
+                            native_execution_evidence.get("all_native_evidence")
+                            or native_execution_evidence.get("partial_evidence")
+                            or local_file_action_probe.get("evidence")
                             or "当前提供动作队列、能力位、桌面执行计划、动作级 dry-run 校验摘要、k12.localNativeExecutionRequest.v1 原生执行请求合同和 k12.localFileActionExecution.v1 OMML 文件动作执行合同，不声明真实桌面执行"
                         ),
-                        current=str(local_file_action_probe.get("current") or "需要外部/本地真实环境证明"),
+                        current=str(native_execution_evidence.get("all_native_current") or native_execution_evidence.get("partial_current") or local_file_action_probe.get("current") or "需要外部/本地真实环境证明"),
+                        gap=str(native_execution_evidence.get("remaining_gap") or "需要真实桌面客户端补齐 Office、MathType、OMML 写回和 Word 宏动作证据"),
                     ),
                     self._acceptance_item(
                         "17.10.8",
@@ -2910,6 +3549,7 @@ class TaskProcessor:
                 "uncovered_risk": item["verification"]["uncovered_risk"],
                 "blocking_reasons": item["verification"]["blocking_reasons"],
                 "required_environment": item["verification"]["required_environment"],
+                "verification_checklist": item["verification"].get("verification_checklist", []),
                 "next_step": item["next_step"],
             }
             for item in all_items
@@ -2932,7 +3572,7 @@ class TaskProcessor:
             "uncovered_risks": uncovered_risks,
             "guardrails": [
                 "Office、MathType、OMML 写回和 Word 宏执行属于本地客户端实测能力，不在网页端伪造执行结果。",
-                "PDF 转 Word 默认使用 Mathpix 合同，但外部上传必须由用户授权并配置凭证。",
+                "纯文本 PDF 本地解析；扫描、混合和复杂 PDF 使用 Mathpix 时必须由用户授权并配置凭证。",
                 "Windows 与 macOS 安装和 MathType 对象格式分开验收，跨平台交付使用 MathML、LaTeX 或图片兜底。",
             ],
         }
@@ -2975,7 +3615,8 @@ class TaskProcessor:
             "blue": "进入后续版本规划",
             "bad": "补齐实现和测试后重新验收",
         }.get(level, "补充证据")
-        verification = self._acceptance_verification_context(level, status, gap)
+        effective_gap = gap or ("需要外部/本地真实环境证明" if level == "warn" else "")
+        verification = self._acceptance_verification_context(level, status, effective_gap)
         return {
             "key": key,
             "requirement": requirement,
@@ -2983,14 +3624,14 @@ class TaskProcessor:
             "status": status,
             "evidence": evidence,
             "current": current,
-            "gap": gap or ("需要外部/本地真实环境证明" if level == "warn" else ""),
+            "gap": effective_gap,
             "next_step": next_step or default_next_step,
             "verification": verification,
         }
 
     @staticmethod
     def _acceptance_verification_context(level: str, status: str, gap: str = "") -> dict[str, Any]:
-        """Classify verification scope without overstating local or external coverage."""
+        """Classify verification scope with checklists without overstating local or external coverage."""
         if status == "需 Mathpix 实测":
             return {
                 "scope": "external_mathpix",
@@ -3001,6 +3642,12 @@ class TaskProcessor:
                     "external_ocr_result_not_verified",
                 ],
                 "required_environment": ["Mathpix APP ID/KEY", "外部上传授权", "可访问 Mathpix API 的网络"],
+                "verification_checklist": [
+                    "在设置中开启 Mathpix 外部上传授权，并配置 MATHPIX_APP_ID / MATHPIX_APP_KEY",
+                    "使用可上传的扫描型或含公式 PDF 创建 pdf_to_word 任务，并等待 Mathpix 作业完成",
+                    "确认 DOCX 与 tex.zip 输出进入 artifacts，并核对下载清单的哈希与状态",
+                    "复核公式报告中的识别结果、低置信度标记和人工确认记录",
+                ],
             }
         if status == "需本地客户端实测":
             return {
@@ -3012,6 +3659,12 @@ class TaskProcessor:
                     "native_writeback_not_verified",
                 ],
                 "required_environment": ["真实本地客户端", "Microsoft Office 或兼容桌面组件", "同平台 MathType 环境"],
+                "verification_checklist": [
+                    "在目标 Windows 或 macOS 上安装同平台本地客户端、Office 和 MathType 或兼容组件",
+                    "发送包含 Office、MathType、OMML 依赖检索和宏执行能力位的本地客户端心跳",
+                    "领取受令牌保护的 local-payload，并执行同平台 native-plan 或显式本地文件动作",
+                    "通过 local-sync 回传输出摘要、动作结果和报告证据，确认没有跨平台 MathType 对象交付",
+                ],
             }
         if level == "warn":
             return {
@@ -3019,12 +3672,18 @@ class TaskProcessor:
                 "uncovered_risk": gap,
                 "blocking_reasons": ["external_or_native_verification_required"] if gap else [],
                 "required_environment": ["真实本地客户端、Office、MathType 或 Mathpix 授权环境"] if gap else [],
+                "verification_checklist": [
+                    "补齐真实环境运行记录、输出文件和报告证据后再改为已覆盖",
+                ]
+                if gap
+                else [],
             }
         return {
             "scope": "local_evidence",
             "uncovered_risk": "",
             "blocking_reasons": [],
             "required_environment": [],
+            "verification_checklist": [],
         }
 
     @staticmethod
@@ -3045,6 +3704,7 @@ class TaskProcessor:
         probes = {
             "word_to_ppt": self._probe_word_to_ppt_conversion(),
             "ppt_to_word": self._probe_ppt_to_word_conversion(),
+            "pdf_to_word": self._probe_pdf_to_word_conversion(),
         }
         self._conversion_probe_cache = probes
         return probes
@@ -3101,6 +3761,29 @@ class TaskProcessor:
                     "artifact_type": "docx",
                     "evidence": "内置转换自检通过：PPT 转 Word 可生成 DOCX，并包含 word/document.xml",
                     "current": f"自检通过，段落 {len(blocks)} 段",
+                }
+        except Exception as exc:
+            return self._conversion_probe_failure("docx", exc)
+
+    def _probe_pdf_to_word_conversion(self) -> dict[str, Any]:
+        """Probe the local text-layer PDF-to-Word converter with a temporary PDF."""
+        try:
+            with tempfile.TemporaryDirectory(prefix="k12-conversion-probe-") as tmp:
+                root = Path(tmp)
+                source = root / "probe.pdf"
+                target = root / "probe.docx"
+                build_text_pdf(["K12 PDF text layer", "PDF to Word local conversion"], source, "K12 Probe")
+                summary = build_docx_from_pdf_text(source, target, "K12 PDF 转 Word 自检")
+                validation_error = self._output_artifact_validation_error(target, "docx")
+                blocks = extract_docx_blocks(target)
+                if validation_error or not blocks or int(summary.get("character_count") or 0) <= 0:
+                    raise ValueError(validation_error or "DOCX 文本内容缺失")
+                return {
+                    "schema_version": "k12.conversionCapabilityProbe.v1",
+                    "available": True,
+                    "artifact_type": "docx",
+                    "evidence": "内置转换自检通过：文本型 PDF 可解析文本层并生成通过 OOXML 校验的 DOCX",
+                    "current": f"自检通过，提取文本 {summary['paragraph_count']} 段，DOCX 段落 {len(blocks)} 段",
                 }
         except Exception as exc:
             return self._conversion_probe_failure("docx", exc)
@@ -3394,6 +4077,10 @@ class TaskProcessor:
                 if int(dry_action.get("step_count") or 0) < 3:
                     raise ValueError("dry-run 宏步骤数量不足")
 
+                task["status"] = "待处理"
+                task["progress"] = 95
+                task["end_time"] = ""
+                probe_store.save_task(task)
                 synced = probe_processor.sync_local_task_status(task["id"], build_dry_run_sync_payload(payload))
                 sync = synced.get("local_sync") if isinstance(synced.get("local_sync"), dict) else {}
                 if sync.get("dry_run_execution_status") != "ready_for_native_client" or sync.get("dry_run_ready_action_count") != 1:
@@ -3778,6 +4465,94 @@ class TaskProcessor:
         self._local_result_upload_probe_cache = probe
         return probe
 
+    def _local_install_platform_probe(self) -> dict[str, Any]:
+        """Self-check Windows/macOS installer contracts and CLI manifest summaries."""
+        cached = getattr(self, "_local_install_platform_probe_cache", None)
+        if isinstance(cached, dict):
+            return cached
+        try:
+            from .local_client import summarize_manifest
+
+            with tempfile.TemporaryDirectory(prefix="k12-install-platform-probe-") as tmp:
+                root = Path(tmp)
+                probe_store = AppStore(root / "data")
+                probe_store.update_settings({"localClientPlatform": "Windows", "localSecurityToken": "probe-token"})
+                windows_package = probe_store.installers_dir / "K12-Local-Client-Windows-x64.msi"
+                macos_package = probe_store.installers_dir / "K12-Local-Client-macOS-universal.pkg"
+                windows_package.write_bytes(b"k12 windows installer probe")
+                macos_package.write_bytes(b"k12 macos installer probe")
+                probe_processor = TaskProcessor(probe_store)
+
+                windows_plan = probe_processor.install_plan("Windows")
+                macos_plan = probe_processor.install_plan("macOS")
+                if windows_plan.get("installer_kind") != "windows-msi" or not windows_plan.get("package", {}).get("download_available"):
+                    raise ValueError("Windows 安装计划未暴露可下载 .msi")
+                if macos_plan.get("installer_kind") != "macos-pkg" or not macos_plan.get("package", {}).get("download_available"):
+                    raise ValueError("macOS 安装计划未暴露可下载 .pkg")
+                if "?platform=Windows" not in str(windows_plan.get("package", {}).get("download_url") or ""):
+                    raise ValueError("Windows 安装包下载未要求 platform=Windows")
+                if "?platform=macOS" not in str(macos_plan.get("package", {}).get("download_url") or ""):
+                    raise ValueError("macOS 安装包下载未要求 platform=macOS")
+                for plan in (windows_plan, macos_plan):
+                    compatibility = plan.get("formula_compatibility") if isinstance(plan.get("formula_compatibility"), dict) else {}
+                    if compatibility.get("platform_objects_cross_compatible") is not False:
+                        raise ValueError("安装公式合同未阻止跨平台 MathType 对象")
+                    if "MathML" not in list(compatibility.get("fallback_formats") or []):
+                        raise ValueError("安装公式合同缺少兜底格式")
+
+                manifest = probe_processor.local_client_manifest()
+                summary = summarize_manifest(manifest)
+                serialized = json.dumps({"manifest": manifest, "summary": summary}, ensure_ascii=False)
+                summary_installer = summary.get("platform", {}).get("installer", {})
+                summary_formula = summary.get("platform", {}).get("formula_compatibility", {})
+                if summary.get("schema_version") != "k12.localClientManifestSummary.v1":
+                    raise ValueError("CLI manifest 摘要版本缺失")
+                if summary_installer.get("file_name") != windows_package.name:
+                    raise ValueError("CLI manifest 摘要未保留 Windows 安装包文件名")
+                if not summary_installer.get("download_requires_platform_query"):
+                    raise ValueError("CLI manifest 摘要未声明 platform 查询要求")
+                if "?platform=Windows" not in str(summary_installer.get("download_url") or ""):
+                    raise ValueError("CLI manifest 摘要未保留受控下载路径")
+                if summary_formula.get("platform_objects_cross_compatible") is not False:
+                    raise ValueError("CLI manifest 摘要未阻止跨平台 MathType 对象")
+                if str(root) in serialized or "probe-token" in serialized:
+                    raise ValueError("安装 manifest 或摘要泄露本地路径/令牌")
+
+                probe_processor.record_local_client_heartbeat({"client_id": "install-probe", "platform": "macOS", "status": "online"})
+                mismatch = summarize_manifest(probe_processor.local_client_manifest())
+                mismatch_formula = mismatch.get("platform", {}).get("formula_compatibility", {})
+                mismatch_installer = mismatch.get("platform", {}).get("installer", {})
+                blockers = set(mismatch_formula.get("native_handoff_blocking_reasons") or [])
+                blockers.update(mismatch_installer.get("native_handoff_blocking_reasons") or [])
+                if mismatch_formula.get("heartbeat_platform") != "macOS" or "platform_mismatch" not in blockers:
+                    raise ValueError("平台不符心跳未进入安装/公式合同阻断")
+
+                probe = {
+                    "schema_version": "k12.localInstallPlatformProbe.v1",
+                    "available": True,
+                    "platforms": ["Windows", "macOS"],
+                    "installer_kinds": [windows_plan["installer_kind"], macos_plan["installer_kind"]],
+                    "manifest_summary_schema": summary["schema_version"],
+                    "download_requires_platform_query": bool(summary_installer.get("download_requires_platform_query")),
+                    "platform_mismatch_blocked": True,
+                    "evidence": "安装平台自检通过：Windows .msi、macOS .pkg、/api/installers/{file_name}?platform=... 下载边界、k12.localClientManifestSummary.v1 脱敏摘要和 MathType 同平台阻断均可验证",
+                    "current": "自检通过，Windows/macOS 安装包按平台区分，CLI manifest 摘要不泄露 installers 路径或令牌，macOS 心跳接收 Windows 目标时触发 platform_mismatch；真实安装包签名和桌面安装仍需发布环境实测",
+                }
+        except Exception as exc:
+            probe = {
+                "schema_version": "k12.localInstallPlatformProbe.v1",
+                "available": False,
+                "platforms": [],
+                "installer_kinds": [],
+                "manifest_summary_schema": "",
+                "download_requires_platform_query": False,
+                "platform_mismatch_blocked": False,
+                "evidence": f"安装平台自检失败：{self._redact_local_path_text(str(exc) or exc.__class__.__name__)}",
+                "current": "自检失败；真实安装包与桌面安装仍需发布环境实测",
+            }
+        self._local_install_platform_probe_cache = probe
+        return probe
+
     def _local_file_action_execution_probe(self) -> dict[str, Any]:
         """Self-check authorized local file actions for OMML dependency copies only."""
         cached = getattr(self, "_local_file_action_execution_probe_cache", None)
@@ -3933,6 +4708,8 @@ class TaskProcessor:
                 root = Path(tmp)
                 document = root / "macro-document.docm"
                 template = root / "macro-template.dotm"
+                empty_container = root / "empty-macro-container.docm"
+                disguised_container = root / "disguised-macro.docx"
                 for path in (document, template):
                     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
                         archive.writestr(
@@ -3942,21 +4719,32 @@ class TaskProcessor:
                             "</w:document>",
                         )
                         archive.writestr("word/vbaProject.bin", b"k12-macro-probe")
+                with zipfile.ZipFile(empty_container, "w", zipfile.ZIP_DEFLATED) as archive:
+                    archive.writestr("word/document.xml", "<w:document />")
+                with zipfile.ZipFile(disguised_container, "w", zipfile.ZIP_DEFLATED) as archive:
+                    archive.writestr("word/document.xml", "<w:document />")
+                    archive.writestr("word/vbaProject.bin", b"k12-disguised-macro-probe")
                 document_item = analyzer.analyze_file(document)
                 template_item = analyzer.analyze_file(template)
+                empty_item = analyzer.analyze_file(empty_container)
+                disguised_item = analyzer.analyze_file(disguised_container)
                 document_available = document_item.file_type == "Word" and document_item.has_macro and not document_item.validation_errors
                 template_available = template_item.file_type == "Word" and template_item.has_macro and not template_item.validation_errors
                 if not document_available or not template_available:
-                    raise ValueError("DOCM 或 DOTM 宏启用容器未被标记为含宏")
+                    raise ValueError("DOCM 或 DOTM 中的 VBA 项目未被标记为宏")
+                if empty_item.has_macro:
+                    raise ValueError("不含 VBA 项目的 DOCM 空容器被误报为宏")
+                if not disguised_item.has_macro:
+                    raise ValueError("错误扩展名中的 VBA 项目未被识别")
                 probe = {
                     "schema_version": "k12.macroDetectionProbe.v1",
                     "document_available": True,
                     "template_available": True,
                     "document_extension": document_item.extension,
                     "template_extension": template_item.extension,
-                    "document_evidence": "宏检测自检通过：DOCM 当前 Word 文档会标记 has_macro",
-                    "template_evidence": "宏检测自检通过：DOTM Word 模板会标记 has_macro",
-                    "current": "自检通过，DOCM 与 DOTM 宏启用容器均可识别；真实 VBA 模块枚举仍需本地 Word COM",
+                    "document_evidence": "宏检测自检通过：当前 Word 文档按 word/vbaProject.bin 实际部件标记 has_macro",
+                    "template_evidence": "宏检测自检通过：Word 模板按 word/vbaProject.bin 实际部件标记 has_macro",
+                    "current": "自检通过，DOCM/DOTM 的 VBA 项目可识别，空宏容器不误报，错误扩展名中的 VBA 部件不漏报；真实 VBA 模块枚举仍需本地 Word COM",
                 }
         except Exception as exc:
             probe = {
@@ -3969,6 +4757,107 @@ class TaskProcessor:
                 "current": "自检失败；真实 VBA 模块枚举仍需本地 Word COM",
             }
         self._macro_detection_probe_cache = probe
+        return probe
+
+    def _file_validation_probe(self) -> dict[str, Any]:
+        """Self-check corrupt and encrypted document classification using real signatures."""
+        cached = getattr(self, "_file_validation_probe_cache", None)
+        if isinstance(cached, dict):
+            return cached
+        try:
+            analyzer = DocumentAnalyzer()
+            with tempfile.TemporaryDirectory(prefix="k12-file-validation-probe-") as tmp:
+                root = Path(tmp)
+                corrupt_word = root / "broken.docx"
+                encrypted_word = root / "locked.docx"
+                encrypted_pdf = root / "locked.pdf"
+                corrupt_legacy_word = root / "broken.doc"
+                encrypted_legacy_excel = root / "locked.xls"
+                corrupt_word.write_bytes(b"not-an-ooxml-package")
+                encrypted_word.write_bytes(
+                    b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+                    + b"\x00" * 64
+                    + "EncryptionInfo".encode("utf-16le")
+                    + "EncryptedPackage".encode("utf-16le")
+                )
+                encrypted_pdf.write_bytes(b"%PDF-1.4\n1 0 obj<< /Type /Page /Encrypt >>endobj\n")
+                legacy_header = bytearray(512)
+                legacy_header[:8] = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+                legacy_header[28:30] = b"\xfe\xff"
+                legacy_header[30:32] = (9).to_bytes(2, "little")
+                legacy_header[32:34] = (6).to_bytes(2, "little")
+                corrupt_legacy_word.write_bytes(b"not-a-legacy-office-container")
+                encrypted_legacy_excel.write_bytes(
+                    bytes(legacy_header)
+                    + "EncryptionInfo".encode("utf-16le")
+                    + "EncryptedPackage".encode("utf-16le")
+                )
+                corrupt_item = analyzer.analyze_file(corrupt_word)
+                word_item = analyzer.analyze_file(encrypted_word)
+                pdf_item = analyzer.analyze_file(encrypted_pdf)
+                corrupt_legacy_item = analyzer.analyze_file(corrupt_legacy_word)
+                encrypted_legacy_item = analyzer.analyze_file(encrypted_legacy_excel)
+                corrupt_available = bool(
+                    not corrupt_item.encrypted
+                    and corrupt_item.status == "校验失败"
+                    and any("损坏" in error for error in corrupt_item.validation_errors)
+                    and corrupt_legacy_item.status == "校验失败"
+                    and any("损坏" in error for error in corrupt_legacy_item.validation_errors)
+                )
+                encrypted_available = bool(
+                    word_item.encrypted
+                    and pdf_item.encrypted
+                    and all(
+                        item.status == "校验失败" and any("密码" in error for error in item.validation_errors)
+                        for item in (word_item, pdf_item)
+                    )
+                    and not any("损坏" in error for error in word_item.validation_errors)
+                    and encrypted_legacy_item.encrypted
+                    and encrypted_legacy_item.status == "校验失败"
+                    and any("密码" in error for error in encrypted_legacy_item.validation_errors)
+                )
+                probe_store = AppStore(root / "runtime-data")
+                probe_store.update_settings({"allowExternalMathpixUpload": True})
+                probe_processor = TaskProcessor(probe_store)
+                invalid_pdf = probe_processor.create_uploaded_file("invalid.pdf", b"not-a-pdf")[0]
+                invalid_task = probe_processor.create_task(
+                    {"task_type": "pdf_to_word", "file_ids": [invalid_pdf["id"]]}
+                )
+                invalid_report = probe_store.list_reports()[0]
+                invalid_job = invalid_report["analysis"]["mathpix"][0]
+                invalid_artifact = invalid_report["analysis"]["artifacts"][0]
+                execution_gate_available = bool(
+                    invalid_task.get("status") == "失败"
+                    and invalid_job.get("status") == "validation_failed"
+                    and not (invalid_job.get("recognition_plan") or {}).get("submit_allowed")
+                    and invalid_artifact.get("status") == "validation_failed"
+                    and not invalid_report["analysis"].get("formulas")
+                )
+                if not corrupt_available:
+                    raise ValueError("损坏 OOXML 未进入明确校验错误")
+                if not encrypted_available:
+                    raise ValueError("加密 OOXML/PDF 未进入密码提示或被误报为损坏")
+                if not execution_gate_available:
+                    raise ValueError("校验失败文件仍进入转换、对象提取或 Mathpix 提交流程")
+                probe = {
+                    "schema_version": "k12.fileValidationProbe.v1",
+                    "corrupt_available": True,
+                    "encrypted_available": True,
+                    "execution_gate_available": True,
+                    "corrupt_evidence": "文件校验自检通过：损坏 OOXML 和旧版 Office OLE 会进入 validation_errors，且校验失败文件不会生成派生对象、转换产物或 Mathpix 上传",
+                    "encrypted_evidence": "文件加密自检通过：OLE 加密 OOXML、旧版 Office OLE 与含 /Encrypt 的 PDF 会提示输入密码，且加密文件不误报为损坏",
+                    "current": "自检通过，损坏 OOXML/旧版 OLE、加密 Word/Excel 和加密 PDF 签名均被区分，invalid.pdf 在外部上传已授权时仍被 validation_failed 门槛阻止",
+                }
+        except Exception as exc:
+            probe = {
+                "schema_version": "k12.fileValidationProbe.v1",
+                "corrupt_available": False,
+                "encrypted_available": False,
+                "execution_gate_available": False,
+                "evidence": f"文件校验自检失败：{self._redact_local_path_text(str(exc) or exc.__class__.__name__)}",
+                "current": "自检失败，需复核损坏与加密文件判定",
+            }
+        self._file_validation_probe_cache = probe
         return probe
 
     def _ppt_formula_probe(self) -> dict[str, Any]:
@@ -4418,6 +5307,196 @@ class TaskProcessor:
         completed = mathpix_queue.get("summary", {}).get("completed", 0)
         return f"pdf_to_word {history}；{probe.get('current') or '合同自检未运行'}；Mathpix 队列 {total} 个，已完成 {completed} 个"
 
+    @staticmethod
+    def _mathpix_acceptance_evidence(mathpix_queue: dict[str, Any], reports: list[dict[str, Any]]) -> dict[str, Any]:
+        """Summarize real Mathpix completion evidence for PRD acceptance items."""
+        jobs = [item for item in mathpix_queue.get("jobs", []) if isinstance(item, dict)]
+        pdf_formula_count = 0
+        for report in reports:
+            analysis = report.get("analysis") if isinstance(report.get("analysis"), dict) else {}
+            formulas = analysis.get("formulas") if isinstance(analysis.get("formulas"), list) else []
+            pdf_formula_count += sum(
+                1
+                for formula in formulas
+                if isinstance(formula, dict)
+                and str(formula.get("source_type") or "") == "PDF"
+                and bool(str(formula.get("latex") or formula.get("mathml") or formula.get("mathtype_preview") or "").strip())
+            )
+        scanned_jobs: list[dict[str, Any]] = []
+        formula_jobs: list[dict[str, Any]] = []
+        for job in jobs:
+            recognition = job.get("recognition_plan") if isinstance(job.get("recognition_plan"), dict) else {}
+            retention = job.get("retention") if isinstance(job.get("retention"), dict) else {}
+            ocr_settings = job.get("ocr_settings") if isinstance(job.get("ocr_settings"), dict) else {}
+            if job.get("status") != "completed" and recognition.get("status") != "completed":
+                continue
+            docx_output = TaskProcessor._mathpix_manifest_output(recognition, "docx")
+            tex_output = TaskProcessor._mathpix_manifest_output(recognition, "tex.zip")
+            pdf_type = str(retention.get("pdf_type") or "")
+            if bool(ocr_settings.get("text_ocr")) and pdf_type in {"扫描型 PDF", "混合型 PDF"} and TaskProcessor._mathpix_output_downloaded_with_hash(docx_output):
+                scanned_jobs.append(job)
+            if bool(ocr_settings.get("formula_ocr")) and TaskProcessor._mathpix_output_downloaded_with_hash(tex_output):
+                formula_jobs.append(job)
+        scanned_available = bool(scanned_jobs)
+        formula_available = bool(formula_jobs) and pdf_formula_count > 0
+        scanned_count = len(scanned_jobs)
+        formula_count = max(pdf_formula_count, len(formula_jobs))
+        return {
+            "schema_version": "k12.mathpixAcceptanceEvidence.v1",
+            "scanned_ocr_available": scanned_available,
+            "formula_ocr_available": formula_available,
+            "scanned_completed_count": scanned_count,
+            "formula_completed_count": len(formula_jobs),
+            "pdf_formula_count": pdf_formula_count,
+            "scanned_evidence": (
+                f"已有 Mathpix 扫描 PDF OCR 实测记录：{scanned_count} 个扫描/混合 PDF 作业完成，DOCX 下载清单完整且哈希可用"
+                if scanned_available
+                else ""
+            ),
+            "scanned_current": (
+                f"Mathpix 已完成扫描/混合 PDF OCR {scanned_count} 个，DOCX 结果进入标准输出和报告"
+                if scanned_available
+                else ""
+            ),
+            "formula_evidence": (
+                f"已有 Mathpix PDF 公式 OCR 实测记录：{len(formula_jobs)} 个作业下载 tex.zip，公式报告解析出 {pdf_formula_count} 个 PDF 公式"
+                if formula_available
+                else ""
+            ),
+            "formula_current": (
+                f"Mathpix tex.zip 与公式报告已完成，PDF 公式 {formula_count} 个；低置信度和人工确认仍按报告策略处理"
+                if formula_available
+                else ""
+            ),
+            "formula_handoff_evidence": (
+                f"Mathpix PDF 公式 OCR 已实测完成，{pdf_formula_count} 个 PDF 公式可交接给 pdf_formula_mathtype；原生 MathType 写回仍需同平台本地客户端"
+                if formula_available
+                else ""
+            ),
+            "formula_handoff_current": (
+                "Mathpix 识别证据已覆盖，剩余为 Office/MathType 同平台本地客户端写回实测"
+                if formula_available
+                else ""
+            ),
+        }
+
+    @staticmethod
+    def _mathpix_manifest_output(recognition: dict[str, Any], output_type: str) -> dict[str, Any]:
+        """Return one Mathpix download manifest output row by artifact type."""
+        manifest = recognition.get("download_manifest") if isinstance(recognition.get("download_manifest"), dict) else {}
+        outputs = manifest.get("outputs") if isinstance(manifest.get("outputs"), list) else []
+        for item in outputs:
+            if isinstance(item, dict) and str(item.get("type") or "") == output_type:
+                return item
+        return {}
+
+    @staticmethod
+    def _mathpix_output_downloaded_with_hash(output: dict[str, Any]) -> bool:
+        """Return whether a Mathpix manifest output was downloaded with integrity evidence."""
+        return str(output.get("status") or "") == "downloaded" and bool(output.get("sha256_available"))
+
+    @staticmethod
+    def _local_native_acceptance_evidence(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+        """Summarize real native desktop execution reports for PRD acceptance."""
+        successful: dict[str, list[dict[str, Any]]] = {}
+        for task in tasks:
+            report = task.get("local_native_execution_report") if isinstance(task.get("local_native_execution_report"), dict) else {}
+            actions = report.get("actions") if isinstance(report.get("actions"), list) else []
+            for action in actions:
+                if not isinstance(action, dict):
+                    continue
+                action_type = str(action.get("type") or "")
+                if action_type not in LOCAL_ACTION_LABELS:
+                    continue
+                if action.get("status") != "success" or not action.get("native_execution_performed"):
+                    continue
+                successful.setdefault(action_type, []).append(
+                    {
+                        "task_id": str(task.get("id") or ""),
+                        "task_type": str(task.get("task_type") or ""),
+                        "platform": normalize_platform(str(action.get("platform") or report.get("platform") or "")),
+                        "output_artifact_types": [str(item) for item in action.get("output_artifact_types") or [] if isinstance(item, str)][:12],
+                    }
+                )
+        native_required = {"office_conversion", "omml_mathtype", "pdf_formula_mathtype", "macro_sequence"}
+        available_types = set(successful)
+        missing_types = sorted(native_required - available_types)
+        available_labels = [LOCAL_ACTION_LABELS.get(action_type, action_type) for action_type in sorted(available_types & native_required)]
+        missing_labels = [LOCAL_ACTION_LABELS.get(action_type, action_type) for action_type in missing_types]
+        omml_count = len(successful.get("omml_mathtype", []))
+        macro_count = len(successful.get("macro_sequence", []))
+        pdf_formula_count = len(successful.get("pdf_formula_mathtype", []))
+        all_native = native_required.issubset(available_types)
+        partial_current = ""
+        if available_labels:
+            partial_current = f"已收到本地客户端原生执行证据：{', '.join(available_labels)}；仍缺 {', '.join(missing_labels) if missing_labels else '无'}"
+        return {
+            "schema_version": "k12.localNativeAcceptanceEvidence.v1",
+            "available_action_types": sorted(available_types),
+            "missing_action_types": missing_types,
+            "omml_mathtype_available": omml_count > 0,
+            "macro_sequence_available": macro_count > 0,
+            "pdf_formula_mathtype_available": pdf_formula_count > 0,
+            "office_conversion_available": bool(successful.get("office_conversion")),
+            "all_native_actions_available": all_native,
+            "omml_evidence": (
+                f"已有本地客户端原生执行证据：{omml_count} 个 omml_mathtype 动作成功，MathType/OMML 写回由同平台客户端回传"
+                if omml_count
+                else ""
+            ),
+            "omml_retry_evidence": (
+                f"已有本地客户端原生执行证据：OMML 依赖补齐后的重新转换动作成功 {omml_count} 次"
+                if omml_count
+                else ""
+            ),
+            "omml_current": (
+                f"本地客户端已回传 OMML/MathType 原生执行成功 {omml_count} 次，平台证据已脱敏保存"
+                if omml_count
+                else ""
+            ),
+            "macro_evidence": (
+                f"已有本地客户端原生执行证据：{macro_count} 个 macro_sequence 动作成功，Word 宏按本地队列执行"
+                if macro_count
+                else ""
+            ),
+            "macro_current": (
+                f"本地客户端已回传 Word 宏顺序执行成功 {macro_count} 次，结果路径未进入验收矩阵"
+                if macro_count
+                else ""
+            ),
+            "pdf_formula_evidence": (
+                f"已有本地客户端原生执行证据：{pdf_formula_count} 个 pdf_formula_mathtype 动作成功，PDF 公式后处理已写回同平台 MathType 合同"
+                if pdf_formula_count
+                else ""
+            ),
+            "pdf_formula_current": (
+                f"本地客户端已回传 PDF 公式 MathType 后处理成功 {pdf_formula_count} 次，Mathpix 与本地写回证据均可追踪"
+                if pdf_formula_count
+                else ""
+            ),
+            "all_native_evidence": (
+                f"已有本地客户端原生执行证据：{', '.join(available_labels)} 均成功回传"
+                if all_native
+                else ""
+            ),
+            "partial_evidence": (
+                f"已有部分本地客户端原生执行证据：{', '.join(available_labels)} 成功回传；尚缺 {', '.join(missing_labels)}"
+                if available_labels and not all_native
+                else ""
+            ),
+            "remaining_gap": (
+                f"尚缺真实本地执行证据：{', '.join(missing_labels)}"
+                if missing_labels
+                else ""
+            ),
+            "all_native_current": (
+                "Office、MathType、OMML 和 Word 宏相关动作均已有本地客户端原生执行成功记录"
+                if all_native
+                else ""
+            ),
+            "partial_current": partial_current,
+        }
+
     def product_summary(self) -> dict[str, Any]:
         """Return PRD product capability coverage and staged roadmap status."""
         settings = self.store.get_settings()
@@ -4428,7 +5507,7 @@ class TaskProcessor:
         core_capabilities = [
             self._product_capability("upload_batch", "文档可上传、可识别、可批量处理", "implemented", f"文件 {len(files)} 个，任务 {len(tasks)} 个，支持拖拽、文件夹、ZIP、队列和批量报告"),
             self._product_capability("word_ppt", "Word 和 PPT 可互相转换", "contract", "已生成最小 OOXML 转换产物和对象保留清单，高保真排版交给本地 Office 引擎复核"),
-            self._product_capability("pdf_word", "PDF 可转换为 Word", "contract", f"PDF 转 Word 默认 Mathpix，外部上传授权 {('已开启' if settings.get('allowExternalMathpixUpload') else '未开启')}"),
+            self._product_capability("pdf_word", "PDF 可转换为 Word", "implemented", f"纯文本 PDF 已支持本地转换；扫描、混合和复杂 PDF 使用 Mathpix，外部上传授权 {('已开启' if settings.get('allowExternalMathpixUpload') else '未开启')}"),
             self._product_capability("omml_detection", "Word 处理前可检测是否存在 Word 自带公式", "implemented", "文件分析会标记 OMML、缺失依赖和转换确认状态"),
             self._product_capability("omml_to_mathtype", "Word 自带公式可转换为 MathType 公式", "contract", "已提供转换确认、依赖状态和本地客户端动作队列；真实写回需桌面端实测"),
             self._product_capability("omml_search_copy", "找不到 OMML 文件时，可检索电脑本地 OMML 文件并复制到当前文档所在文件夹", "contract", "检索路径、手动指定和复制策略已进入任务合同；复制需本地客户端权限"),
@@ -4572,6 +5651,9 @@ class TaskProcessor:
             "file_name": spec["file_name"],
             "status": "可下载" if package_exists else ("安装包无效" if package_invalid else ("需选择平台" if not spec["file_name"] else "待打包")),
             "download_url": f"/api/installers/{spec['file_name']}?{urlencode({'platform': profile['platform']})}" if package_exists else "",
+            "download_available": package_exists,
+            "package_present": package_exists or package_invalid,
+            "package_valid": package_exists,
             "size": package_size if package_exists else 0,
             "sha256": self._sha256(package_path) if package_exists and package_path else "",
             "checksum_required": bool(spec["file_name"]),
@@ -4734,7 +5816,7 @@ class TaskProcessor:
         }
 
     def installer_download_info(self, file_name: str, requested_platform: str | None = None) -> dict[str, Any]:
-        """Validate a platform-specific local installer before serving it."""
+        """Validate an explicitly platform-scoped local installer download."""
         safe_name = Path(file_name).name
         if safe_name != file_name:
             raise ValueError("Invalid installer name")
@@ -4747,9 +5829,11 @@ class TaskProcessor:
         if not spec:
             raise ValueError("Installer is not registered for Windows or macOS")
         requested = normalize_platform(requested_platform) if requested_platform else ""
-        if requested and requested not in {"Windows", "macOS"}:
+        if not requested:
+            raise ValueError("Installer platform query is required")
+        if requested not in {"Windows", "macOS"}:
             raise ValueError("Installer platform must be Windows or macOS")
-        if requested and requested != spec["platform"]:
+        if requested != spec["platform"]:
             raise ValueError("Installer platform does not match the requested platform")
         if Path(safe_name).suffix.lower() != spec["extension"]:
             raise ValueError("Installer extension does not match its platform")
@@ -4792,17 +5876,26 @@ class TaskProcessor:
         installer_manifest = {
             "schema_version": "k12.localInstallerManifest.v1",
             "platform": install_plan["platform"],
+            "target_platform": install_plan["formula_compatibility"]["target_platform"],
+            "heartbeat_platform": install_plan["formula_compatibility"]["heartbeat_platform"],
             "installer_kind": install_plan["installer_kind"],
             "file_name": str(package.get("file_name") or ""),
             "status": str(package.get("status") or "待打包"),
             "download_url": str(package.get("download_url") or ""),
-            "download_requires_platform_query": bool(package.get("download_url")),
+            "download_requires_platform_query": bool(package.get("file_name")),
+            "download_available": bool(package.get("download_available")),
+            "package_present": bool(package.get("package_present")),
+            "package_valid": bool(package.get("package_valid")),
             "size": int(package.get("size") or 0),
             "sha256": str(package.get("sha256") or ""),
             "checksum_required": bool(package.get("checksum_required")),
             "expected_location_available": bool(package.get("expected_location")),
             "path_policy": "本地 installers 路径不写入 manifest；安装包下载必须走 /api/installers/{file_name}?platform=...",
             "formula_object_boundary": install_plan["formula_compatibility"]["package_boundary"],
+            "same_platform_required_for_native_objects": bool(install_plan["formula_compatibility"]["same_platform_required_for_native_objects"]),
+            "native_handoff_allowed": bool(install_plan["formula_compatibility"]["native_handoff_allowed"]),
+            "native_handoff_blocking_reasons": list(install_plan["formula_compatibility"]["native_handoff_blocking_reasons"]),
+            "fallback_formats": list(install_plan["formula_compatibility"]["fallback_formats"]),
         }
         local_tasks = [
             task
@@ -4829,6 +5922,7 @@ class TaskProcessor:
                 "mathtype_object_format": profile["mathtypeObjectFormat"],
                 "formula_portability": profile["formulaPortability"],
                 "formula_object_interop": profile["formulaObjectInterop"],
+                "formula_compatibility": install_plan["formula_compatibility"],
             },
             "security": {
                 "token_configured": token_configured,
@@ -4848,15 +5942,21 @@ class TaskProcessor:
                 "available": True,
                 "command": f"python3 -m k12.local_client --origin {origin} --token <K12_LOCAL_TOKEN>",
                 "native_plan_command": f"python3 -m k12.local_client --origin {origin} --token <K12_LOCAL_TOKEN> --native-plan",
+                "native_report_command": f"python3 -m k12.local_client --origin {origin} --token <K12_LOCAL_TOKEN> --native-report-json <report.json>",
                 "file_action_command": f"python3 -m k12.local_client --origin {origin} --token <K12_LOCAL_TOKEN> --execute-file-actions",
                 "dry_run_supported": True,
                 "dry_run_execution_schema": "k12.localDryRunExecution.v1",
                 "native_plan_supported": True,
                 "native_execution_request_schema": "k12.localNativeExecutionRequest.v1",
+                "native_report_supported": True,
+                "native_execution_report_schema": "k12.localNativeExecutionReport.v1",
                 "file_actions_supported": True,
                 "file_action_execution_schema": "k12.localFileActionExecution.v1",
-                "executes_native_documents": False,
-                "description": "标准库本地伴随客户端可独立运行、发送心跳、领取任务载荷，按桌面执行计划回传动作级 dry-run 校验摘要，也可生成原生执行请求合同，并在显式授权后执行 OMML 依赖复制等安全本地文件动作；不会伪造 Office、MathType、OMML 写回或 Word 宏执行。",
+                "macos_office_execution_supported": True,
+                "native_office_execution_schema": "k12.macosOfficeTaskExecution.v1",
+                "native_office_command": f"python3 -m k12.local_client --origin {origin} --token <K12_LOCAL_TOKEN> --allow-native-execution --execute-native-office",
+                "executes_native_documents": True,
+                "description": "标准库本地伴随客户端可发送心跳、领取任务载荷、生成 dry-run/原生请求、桥接外部报告，执行 OMML 依赖复制等安全本地文件动作，并在双重显式授权下执行受支持的 macOS 旧 Word/PPT Office 转换；MathType、OMML 写回和 Word 宏仍保持阻断。",
             },
             "endpoints": [
                 {"method": "GET", "path": "/api/tasks/{task_id}/local-payload", "auth": "configured-token", "sensitive": True},
@@ -4932,7 +6032,7 @@ class TaskProcessor:
             "platform": normalize_platform(str(preflight.get("platform") or "")),
             "components": components,
             "capabilities": capabilities,
-            "executes_native_documents": False,
+            "executes_native_documents": bool(preflight.get("executes_native_documents")),
             "path_policy": "component paths are not stored",
         }
 
@@ -5573,6 +6673,7 @@ class TaskProcessor:
             raise KeyError(f"Task not found: {task_id}")
         files = [self.store.get_file(file_id) for file_id in task.get("file_ids", [])]
         files = [file for file in files if file]
+        files = self._local_payload_snapshot_files(task, files)
         report = self._latest_report_for_task(task_id)
         settings = self.store.get_settings()
         execute_mode = str(task.get("execute_mode") or self.resolve_execute_mode(str(task.get("task_type") or ""), list(task.get("file_ids") or [])))
@@ -5756,7 +6857,7 @@ class TaskProcessor:
             "capabilities": {key: self._local_capability_available(capabilities.get(key)) for key in LOCAL_CLIENT_CAPABILITY_LABELS},
             "components": dict(preflight.get("components") or {}),
             "preflight_schema_version": str(preflight.get("schema_version") or ""),
-            "executes_native_documents": False,
+            "executes_native_documents": bool(preflight.get("executes_native_documents")),
         }
 
     @staticmethod
@@ -5853,6 +6954,10 @@ class TaskProcessor:
         }
         plan_status = plan_status_map.get(readiness_status, "pending_preflight")
         native_action_count = sum(1 for action in actions if str(action.get("type") or "") != "open_output_directory")
+        companion_office_execution = bool(
+            readiness.get("platform") == "macOS"
+            and any(str(action.get("type") or "") == "office_conversion" for action in actions)
+        )
         formula_delivery = self._local_formula_delivery_contract(settings)
         same_platform_required = any(
             str(action.get("type") or "") in {"omml_mathtype", "office_conversion"} and bool(formula_delivery.get("native_object_requires_same_platform"))
@@ -5867,7 +6972,7 @@ class TaskProcessor:
             "status": plan_status,
             "native_execution_allowed": readiness_status == "ready_for_handoff",
             "web_executes_native_documents": False,
-            "current_companion_cli_executes_native_documents": False,
+            "current_companion_cli_executes_native_documents": companion_office_execution,
             "execution_surface": "local_desktop_client",
             "action_count": len(actions),
             "native_action_count": native_action_count,
@@ -6068,6 +7173,35 @@ class TaskProcessor:
             {"order": 1, "operation": "local.noop", "title": "等待本地客户端识别动作类型", "required": False},
         ]
 
+    def _local_payload_snapshot_files(self, task: dict[str, Any], files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Use verified task snapshots for sensitive desktop handoff paths."""
+        snapshots = {
+            str(item.get("file_id") or ""): item
+            for item in task.get("source_snapshots") or []
+            if isinstance(item, dict)
+        }
+        prepared: list[dict[str, Any]] = []
+        for original in files:
+            file = dict(original)
+            snapshot = snapshots.get(str(file.get("id") or ""))
+            if snapshot:
+                path = Path(str(snapshot.get("path") or ""))
+                expected_size = int(snapshot.get("size") or 0)
+                expected_sha256 = str(snapshot.get("sha256") or "")
+                if path.exists() and path.is_file() and path.stat().st_size == expected_size and self._sha256(path) == expected_sha256:
+                    file["storage_path"] = str(path)
+                    file["file_path"] = str(path)
+                    file["source_kind"] = "task_snapshot"
+                    file["file_size"] = expected_size
+                    file["source_sha256"] = expected_sha256
+                else:
+                    errors = list(file.get("validation_errors") or [])
+                    errors.append("任务源文件快照完整性校验失败")
+                    file["validation_errors"] = list(dict.fromkeys(errors))
+                    file["status"] = "校验失败"
+            prepared.append(file)
+        return prepared
+
     @staticmethod
     def _local_payload_file(file: dict[str, Any]) -> dict[str, Any]:
         """Return a sensitive local payload file row for the companion client."""
@@ -6079,6 +7213,7 @@ class TaskProcessor:
             "file_type": file.get("file_type", ""),
             "extension": file.get("extension", ""),
             "file_size": file.get("file_size", 0),
+            "source_sha256": file.get("source_sha256", ""),
             "source_relative_path": file.get("source_relative_path", ""),
             "input_path": input_path,
             "input_path_exists": bool(path and path.exists()),
@@ -6172,11 +7307,23 @@ class TaskProcessor:
                     }
                 )
         if task_type in {"word_to_ppt", "ppt_to_word", "excel_to_pdf", "excel_to_word", "excel_to_ppt"}:
+            artifacts = [item for item in analysis.get("artifacts", []) if isinstance(item, dict)]
+            pending_files = [
+                {
+                    "file_id": item.get("file_id", ""),
+                    "source_file": item.get("source_file", ""),
+                    "output_type": item.get("output_type", ""),
+                }
+                for item in artifacts
+                if item.get("status") == "待本地客户端执行"
+            ]
+            completed = bool(artifacts) and all(item.get("status") in {"成功", "跳过"} for item in artifacts)
             actions.append(
                 {
                     "type": "office_conversion",
-                    "status": "completed" if analysis.get("artifacts") else "queued",
-                    "artifacts": analysis.get("artifacts", []),
+                    "status": "completed" if completed else "queued",
+                    "artifacts": artifacts,
+                    "pending_files": pending_files,
                     "formula_delivery": formula_delivery,
                 }
             )
@@ -6569,6 +7716,8 @@ class TaskProcessor:
         target.write_bytes(content)
         image["image_path"] = str(target)
         image["asset_url"] = f"/api/assets/{target.relative_to(self.store.data_dir).as_posix()}"
+        image["image_size"] = len(content)
+        image["image_hash"] = hashlib.sha256(content).hexdigest()
         image["export_status"] = "已重新导出"
         image["export_message"] = "已从来源文档重新导出图片资源"
         image["reexported_at"] = now
@@ -6821,7 +7970,23 @@ class TaskProcessor:
                 if extension not in analyzer.supported_extensions():
                     continue
                 target = extract_dir / f"{new_id('entry')}{extension}"
-                target.write_bytes(archive.read(info))
+                try:
+                    target.write_bytes(archive.read(info))
+                except (zipfile.BadZipFile, EOFError, OSError, RuntimeError) as exc:
+                    parent.validation_errors.append(f"ZIP 条目损坏或无法读取：{entry_name}")
+                    parent.status = "校验失败"
+                    parent.content_summary = {
+                        **parent.content_summary,
+                        "failedEntry": entry_name,
+                        "failureType": exc.__class__.__name__,
+                    }
+                    persisted_parent = self.store.get_file(parent.id) or parent.to_dict()
+                    persisted_parent["validation_errors"] = list(parent.validation_errors)
+                    persisted_parent["status"] = parent.status
+                    persisted_parent["content_summary"] = dict(parent.content_summary)
+                    self.store.save_file(persisted_parent)
+                    target.unlink(missing_ok=True)
+                    continue
                 entry = analyzer.analyze_file(target, Path(entry_name).name)
                 entry.source_kind = "archive_entry"
                 entry.source_relative_path = entry_name
@@ -6833,7 +7998,9 @@ class TaskProcessor:
                     "compressedSize": info.compress_size,
                     "uncompressedSize": info.file_size,
                 }
-                items.append(self.store.save_file(entry.to_dict()))
+                record = entry.to_dict()
+                record["source_sha256"] = self._sha256(target)
+                items.append(self.store.save_file(record))
         return items
 
     def _resolve_duplicate_file_name(self, file_name: str, strategy: str) -> str | None:
@@ -6919,7 +8086,14 @@ class TaskProcessor:
     @staticmethod
     def _safe_archive_name(file_name: str) -> str:
         """Return a traversal-safe archive entry name."""
-        parts = [part for part in Path(file_name).parts if part not in {"..", "/", "\\"}]
+        parts: list[str] = []
+        for raw_part in str(file_name or "").replace("\\", "/").split("/"):
+            part = raw_part.strip()
+            if not part or part in {".", ".."}:
+                continue
+            safe = ILLEGAL_FILE_CHARS.sub("_", part)
+            if safe:
+                parts.append(safe)
         return "/".join(parts) or "unnamed"
 
     def _stages_for(self, task_type: str, execute_mode: str) -> list[str]:
@@ -6970,6 +8144,8 @@ class TaskProcessor:
         image_errors: list[dict[str, Any]] = []
         allow_batch_macro = bool(settings.get("allowBatchMacroExecution", True))
         for file_index, file in enumerate(files, start=1):
+            if file.get("validation_errors"):
+                continue
             seed = int(hashlib.sha256(file["id"].encode("utf-8")).hexdigest()[:4], 16)
             if file.get("has_formula"):
                 formulas.extend(self._formula_items(file, seed, task))
@@ -7093,9 +8269,9 @@ class TaskProcessor:
         if not settings.get("enableOmmlPrecheck", True):
             return jobs
         for file in files:
-            if file.get("file_type") != "Word" or not file.get("has_omml"):
+            if file.get("validation_errors") or file.get("file_type") != "Word" or not file.get("has_omml"):
                 continue
-            document_path = Path(file.get("storage_path") or file.get("file_path") or "")
+            document_path = self._original_source_path(file)
             item = OmmlDependencyItem(file_id=file["id"], document_path=str(document_path))
             manual_source = self._manual_omml_dependency(settings)
             if manual_source:
@@ -7218,12 +8394,15 @@ class TaskProcessor:
         candidates = self._omml_candidate_dirs(document_path, settings)
         max_files = int(settings.get("ommlSearchMaxFiles", 3000) or 3000)
         scanned = 0
-        for directory in candidates:
-            if not directory.exists() or not directory.is_dir():
-                continue
+        searchable = [directory for directory in candidates if directory.exists() and directory.is_dir()]
+        # Check every candidate root before recursive scanning. A document in
+        # the first directory must not consume a small global scan budget and
+        # prevent discovery of a directly configured dependency file.
+        for directory in searchable:
             direct = self._find_direct_omml_file(directory)
             if direct:
                 return direct
+        for directory in searchable:
             for root, dirs, files in os.walk(directory):
                 dirs[:] = [name for name in dirs if not name.startswith(".")][:20]
                 for name in files:
@@ -7239,12 +8418,15 @@ class TaskProcessor:
         candidates: list[Path] = []
         if document_path.exists():
             candidates.append(document_path.parent)
-        candidates.extend([self.store.uploads_dir, self.store.output_base_dir(), self.store.data_dir])
+        # Explicit user locations must be searched before broad runtime/home
+        # directories. Otherwise a low scan limit can be exhausted by cached
+        # files before the configured OMML dependency directory is reached.
         configured = str(settings.get("ommlSearchPaths") or "")
         for raw in re.split(r"[\n,;]", configured):
             value = raw.strip()
             if value:
                 candidates.append(Path(value).expanduser())
+        candidates.extend([self.store.uploads_dir, self.store.output_base_dir(), self.store.data_dir])
         home = Path.home()
         candidates.extend([home / "Documents", home / "Desktop", home / "Downloads"])
         unique: list[Path] = []
@@ -7261,20 +8443,43 @@ class TaskProcessor:
         target_dir = document_path.parent if str(document_path) not in {"", "."} and document_path.exists() else self.store.output_base_dir()
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / source.name
+        try:
+            source_data = source.read_bytes()
+        except OSError as exc:
+            item.omml_target_path = str(target)
+            item.copy_status = "失败"
+            item.error_message = str(exc)
+            return
+        item.source_size = len(source_data)
+        item.source_sha256 = hashlib.sha256(source_data).hexdigest()
         if source.resolve() == target.resolve():
             item.omml_target_path = str(target)
             item.copy_status = "跳过"
+            item.target_size = len(source_data)
+            item.target_sha256 = item.source_sha256
             return
         if target.exists() and strategy == "跳过":
             item.omml_target_path = str(target)
-            item.copy_status = "跳过"
+            try:
+                target_data = target.read_bytes()
+                item.copy_status = "跳过"
+                item.target_size = len(target_data)
+                item.target_sha256 = hashlib.sha256(target_data).hexdigest()
+            except OSError as exc:
+                item.copy_status = "失败"
+                item.error_message = str(exc)
             return
         if target.exists() and strategy == "自动重命名":
             target = self._unique_target_path(target)
         try:
-            shutil.copy2(source, target)
+            target.write_bytes(source_data)
+            target_data = target.read_bytes()
+            if target_data != source_data:
+                raise OSError("OMML 依赖目标内容与源快照不一致")
             item.omml_target_path = str(target)
             item.copy_status = "成功"
+            item.target_size = len(target_data)
+            item.target_sha256 = hashlib.sha256(target_data).hexdigest()
         except OSError as exc:
             item.omml_target_path = str(target)
             item.copy_status = "失败"
@@ -7332,6 +8537,12 @@ class TaskProcessor:
                 "wait_for_completion_source": wait_source,
             }
             storage_path = Path(file.get("storage_path") or file.get("file_path") or "")
+            if file.get("validation_errors"):
+                job["status"] = "validation_failed"
+                job["message"] = "PDF 未通过文件校验，禁止提交 Mathpix"
+                self._attach_mathpix_recognition_plan(job, file, settings, allow_upload, storage_path.exists())
+                jobs.append(job)
+                continue
             if not storage_path.exists():
                 job["status"] = "missing_local_file"
                 job["message"] = "PDF 原文件未保存，无法提交 Mathpix"
@@ -7408,11 +8619,86 @@ class TaskProcessor:
         return jobs
 
     @staticmethod
+    def _is_local_text_pdf(file: dict[str, Any]) -> bool:
+        """Return whether a PDF can use the local text-layer conversion path."""
+        summary = file.get("content_summary") if isinstance(file.get("content_summary"), dict) else {}
+        return bool(
+            file.get("file_type") == "PDF"
+            and not file.get("validation_errors")
+            and summary.get("pdfType") == "文本型 PDF"
+            and summary.get("textLayer")
+            and int(summary.get("imageObjects") or 0) == 0
+            and int(summary.get("formulaHints") or 0) == 0
+            and int(summary.get("tableHints") or 0) == 0
+        )
+
+    def _local_pdf_text_artifacts(
+        self, task: dict[str, Any], files: list[dict[str, Any]]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Convert safe text-layer PDFs locally and return artifacts plus audit evidence."""
+        artifacts: list[dict[str, Any]] = []
+        evidence: list[dict[str, Any]] = []
+        output_dir = self.store.output_task_dir(str(task.get("id") or ""))
+        for file in files:
+            source = Path(str(file.get("storage_path") or file.get("file_path") or ""))
+            target, existing_target, _strategy = self._conversion_output_target(output_dir, str(file.get("file_name") or "document.pdf"), ".docx")
+            if target is None:
+                artifacts.append(
+                    self._artifact_skipped(
+                        task,
+                        file,
+                        "docx",
+                        existing_target.name,
+                        f"同名输出已存在，按策略跳过：{existing_target.name}",
+                        self._conversion_settings_snapshot(task, "pdf_to_word"),
+                    )
+                )
+                evidence.append({"file_id": file.get("id", ""), "engine": "本地 PDF 文本层", "status": "skipped_existing_output"})
+                continue
+            try:
+                summary = build_docx_from_pdf_text(source, target, Path(str(file.get("file_name") or "document.pdf")).stem)
+                settings = self._conversion_settings_snapshot(task, "pdf_to_word")
+                settings["pdf_to_word_engine"] = "本地 PDF 文本层"
+                artifact = self._artifact_success(task, file, target, "docx", "已解析 PDF 文本层并生成 Word 文档", settings)
+                artifacts.append(artifact)
+                evidence.append(
+                    {
+                        "file_id": file.get("id", ""),
+                        "engine": "本地 PDF 文本层",
+                        "status": artifact.get("status", ""),
+                        "paragraph_count": int(summary.get("paragraph_count") or 0),
+                        "character_count": int(summary.get("character_count") or 0),
+                        "output_size": int(artifact.get("size") or 0),
+                        "output_sha256": str(artifact.get("sha256") or ""),
+                    }
+                )
+            except (OSError, ValueError) as exc:
+                target.unlink(missing_ok=True)
+                artifacts.append(self._artifact_error(task, file, "text_layer_conversion_failed", str(exc)))
+                evidence.append(
+                    {
+                        "file_id": file.get("id", ""),
+                        "engine": "本地 PDF 文本层",
+                        "status": "失败",
+                        "message": str(exc),
+                    }
+                )
+        return artifacts, evidence
+
+    @staticmethod
     def _write_mathpix_result(path: Path, data: bytes, output_type: str) -> dict[str, Any]:
         """Persist a Mathpix result and return path-free integrity metadata."""
         if not data:
             raise MathpixApiError(f"Mathpix {output_type} 下载结果为空")
         path.write_bytes(data)
+        validation_error = TaskProcessor._output_artifact_validation_error(path, output_type)
+        if validation_error:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                # 下载结果仍按校验失败处理，不会进入输出清单。
+                pass
+            raise MathpixApiError(f"Mathpix {output_type} 下载结果校验失败：{validation_error}")
         return {
             "type": output_type,
             "file_name": path.name,
@@ -7445,6 +8731,7 @@ class TaskProcessor:
         plan_status = {
             "pending": "pending",
             "missing_local_file": "blocked_missing_local_file",
+            "validation_failed": "blocked_validation_failed",
             "ocr_disabled": "blocked_ocr_disabled",
             "authorization_required": "blocked_authorization",
             "missing_credentials": "blocked_missing_credentials",
@@ -7515,6 +8802,7 @@ class TaskProcessor:
             "formula_review": self._formula_review_contract(settings),
             "safety": {
                 "no_upload_without_authorization": True,
+                "no_submit_when_file_validation_failed": True,
                 "task_options_cannot_authorize_external_upload": True,
                 "ignored_task_option_authorization_count": len(task_option_audit.get("ignored_authorization_keys") or []),
                 "task_options_may_request_wait_for_completion": True,
@@ -7727,9 +9015,13 @@ class TaskProcessor:
             blockers.append("missing_credentials")
         if raw_status == "api_error":
             blockers.append("mathpix_api_error")
+        if raw_status == "validation_failed":
+            blockers.append("file_validation_failed")
         status = "ready_to_submit" if not blockers else "blocked"
         if "missing_local_file" in blockers:
             status = "blocked_missing_local_file"
+        elif "file_validation_failed" in blockers:
+            status = "blocked_validation_failed"
         elif "all_ocr_disabled" in blockers:
             status = "blocked_ocr_disabled"
         elif "external_upload_not_authorized" in blockers:
@@ -7762,6 +9054,7 @@ class TaskProcessor:
         labels = {
             "pending": "待提交",
             "blocked_missing_local_file": "缺少本地文件",
+            "blocked_validation_failed": "文件校验失败",
             "blocked_ocr_disabled": "OCR 已关闭",
             "blocked_authorization": "等待授权",
             "blocked_missing_credentials": "缺少凭证",
@@ -7827,7 +9120,7 @@ class TaskProcessor:
                         self._conversion_settings_snapshot(task, "pdf_to_word"),
                     )
                 )
-            elif job.get("status") in {"authorization_required", "missing_credentials", "api_error", "download_failed", "missing_local_file", "ocr_disabled"}:
+            elif job.get("status") in {"authorization_required", "missing_credentials", "api_error", "download_failed", "missing_local_file", "ocr_disabled", "validation_failed"}:
                 artifacts.append(self._artifact_error(task, file, str(job.get("status")), str(job.get("message") or "Mathpix PDF 转 Word 未完成")))
         return artifacts
 
@@ -8051,9 +9344,22 @@ class TaskProcessor:
         artifacts: list[dict[str, Any]] = []
         output_dir = self.store.output_task_dir(task["id"])
         for file in files:
+            if file.get("validation_errors"):
+                artifacts.append(
+                    self._artifact_error(
+                        task,
+                        file,
+                        "validation_failed",
+                        "文件未通过校验，未执行转换",
+                    )
+                )
+                continue
             source = Path(file.get("storage_path") or file.get("file_path") or "")
             if not source.exists() or not source.is_file():
                 artifacts.append(self._artifact_error(task, file, "missing_source", "原文件未保存，无法生成转换输出"))
+                continue
+            if bool((file.get("content_summary") or {}).get("requiresNativeOffice")):
+                artifacts.append(self._artifact_pending_local_office(task, file))
                 continue
             if task["task_type"] == "word_to_ppt" and file.get("file_type") == "Word":
                 artifacts.append(self._word_to_ppt_artifact(task, file, source, output_dir))
@@ -8068,6 +9374,31 @@ class TaskProcessor:
             else:
                 artifacts.append(self._artifact_error(task, file, "unsupported_input", "当前任务不支持该文件类型"))
         return artifacts
+
+    def _artifact_pending_local_office(self, task: dict[str, Any], file: dict[str, Any]) -> dict[str, Any]:
+        """Build a neutral artifact row for legacy Office input awaiting native execution."""
+        output_types = {
+            "word_to_ppt": "pptx",
+            "ppt_to_word": "docx",
+            "excel_to_pdf": "pdf",
+            "excel_to_word": "docx",
+            "excel_to_ppt": "pptx",
+        }
+        output_type = output_types.get(str(task.get("task_type") or ""), "")
+        return {
+            "file_id": file["id"],
+            "task_id": task["id"],
+            "source_file": file.get("file_name", ""),
+            "file_name": "",
+            "output_type": output_type,
+            "path": "",
+            "url": "",
+            "status": "待本地客户端执行",
+            "message": "旧版 Office 二进制文件已通过 OLE 预检，需本地 Office 客户端生成转换产物",
+            "size": 0,
+            "requires_native_office": True,
+            "conversion_settings": self._conversion_settings_snapshot(task, str(task.get("task_type") or "")),
+        }
 
     def _word_to_ppt_artifact(self, task: dict[str, Any], file: dict[str, Any], source: Path, output_dir: Path) -> dict[str, Any]:
         """Build a Word-to-PPT artifact and object preservation summary."""
@@ -8408,6 +9739,18 @@ class TaskProcessor:
         conversion_settings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Build a successful conversion artifact row."""
+        validation_error = self._output_artifact_validation_error(target, output_type)
+        if validation_error:
+            try:
+                target.unlink(missing_ok=True)
+            except OSError:
+                # 保留原始校验错误，报告仍不会暴露失败产物的下载入口。
+                pass
+            artifact = self._artifact_error(task, file, "output_validation_failed", validation_error)
+            artifact["file_name"] = target.name
+            artifact["output_type"] = output_type
+            artifact["conversion_settings"] = conversion_settings or self._conversion_settings_snapshot(task, task.get("task_type", ""))
+            return artifact
         return {
             "file_id": file["id"],
             "task_id": task["id"],
@@ -8419,8 +9762,65 @@ class TaskProcessor:
             "status": "成功",
             "message": message,
             "size": target.stat().st_size,
+            "sha256": self._sha256(target),
             "conversion_settings": conversion_settings or self._conversion_settings_snapshot(task, task.get("task_type", "")),
         }
+
+    @staticmethod
+    def _output_artifact_validation_error(target: Path, output_type: str) -> str:
+        """Return a user-facing error when a generated output cannot be opened safely."""
+        if not target.exists() or not target.is_file():
+            return "转换输出不存在，已标记任务失败"
+        try:
+            if target.stat().st_size <= 0:
+                return "转换输出为空，已标记任务失败"
+            normalized_type = str(output_type or target.suffix.lstrip(".")).lower()
+            required_parts = {
+                "docx": {"[Content_Types].xml", "word/document.xml"},
+                "docm": {"[Content_Types].xml", "word/document.xml"},
+                "pptx": {"[Content_Types].xml", "ppt/presentation.xml"},
+                "xlsx": {"[Content_Types].xml", "xl/workbook.xml"},
+            }
+            if normalized_type in required_parts:
+                if not zipfile.is_zipfile(target):
+                    return f"转换输出 {target.name} 不是可打开的 {normalized_type.upper()} 文件"
+                with zipfile.ZipFile(target) as archive:
+                    names = set(archive.namelist())
+                    missing = sorted(required_parts[normalized_type] - names)
+                    if missing:
+                        return f"转换输出 {target.name} 缺少必需结构：{'、'.join(missing)}"
+                    corrupt_name = archive.testzip()
+                    if corrupt_name:
+                        return f"转换输出 {target.name} 存在损坏部件：{corrupt_name}"
+            elif normalized_type == "tex.zip":
+                if not zipfile.is_zipfile(target):
+                    return f"转换输出 {target.name} 不是可打开的 TEX.ZIP 文件"
+                with zipfile.ZipFile(target) as archive:
+                    infos = archive.infolist()
+                    unsafe_names = [
+                        info.filename
+                        for info in infos
+                        if info.filename.startswith(("/", "\\"))
+                        or ".." in info.filename.replace("\\", "/").split("/")
+                    ]
+                    if unsafe_names:
+                        return f"转换输出 {target.name} 包含不安全路径：{unsafe_names[0]}"
+                    total_size = sum(max(0, int(info.file_size)) for info in infos if not info.is_dir())
+                    if total_size > MATHPIX_TEX_ARCHIVE_LIMIT_BYTES:
+                        return f"转换输出 {target.name} 解压后超过 50MB 安全限制"
+                    corrupt_name = archive.testzip()
+                    if corrupt_name:
+                        return f"转换输出 {target.name} 存在损坏部件：{corrupt_name}"
+            elif normalized_type == "pdf":
+                with target.open("rb") as stream:
+                    header = stream.read(8)
+                    stream.seek(max(0, target.stat().st_size - 1024))
+                    trailer = stream.read()
+                if not header.startswith(b"%PDF-") or b"%%EOF" not in trailer:
+                    return f"转换输出 {target.name} 不是完整的 PDF 文件"
+        except (OSError, zipfile.BadZipFile, RuntimeError) as exc:
+            return f"转换输出 {target.name} 无法打开：{exc}"
+        return ""
 
     def _artifact_skipped(
         self,
@@ -8712,8 +10112,14 @@ class TaskProcessor:
             if macro["execute_status"] in {"待本地客户端执行", "成功"} and options.get("macroBackup", True):
                 backup_path = backup_path or self._create_macro_backup(file, task["id"])
                 macro["backup_path"] = backup_path
+                if backup_path:
+                    backup = Path(backup_path)
+                    macro["backup_size"] = backup.stat().st_size
+                    macro["backup_sha256"] = self._sha256(backup)
             else:
                 macro["backup_path"] = ""
+                macro["backup_size"] = ""
+                macro["backup_sha256"] = ""
             if macro["execute_status"] == "待确认":
                 macro["error_message"] = "宏执行前需要用户确认风险"
             elif macro["execute_status"] == "待本地客户端执行":
@@ -8859,7 +10265,7 @@ class TaskProcessor:
 
     def _create_macro_backup(self, file: dict[str, Any], task_id: str) -> str:
         """Create a managed source backup before macro handoff when possible."""
-        source = Path(file.get("storage_path") or file.get("file_path") or "")
+        source = self._original_source_path(file)
         if not source.exists() or not source.is_file():
             return ""
         target_dir = self.store.backups_dir / task_id
@@ -8867,6 +10273,19 @@ class TaskProcessor:
         target = target_dir / f"{Path(file['file_name']).stem}{source.suffix}.bak"
         shutil.copy2(source, target)
         return str(target)
+
+    @staticmethod
+    def _original_source_path(file: dict[str, Any]) -> Path:
+        """Return the original document path for file actions that must not target snapshots."""
+        return Path(
+            str(
+                file.get("original_storage_path")
+                or file.get("original_file_path")
+                or file.get("storage_path")
+                or file.get("file_path")
+                or ""
+            )
+        )
 
     def _small_image_items(self, file: dict[str, Any], task: dict[str, Any], seed: int, errors: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         """Extract small-image report items from supported source files."""
@@ -8981,7 +10400,9 @@ class TaskProcessor:
             export_status="可导出",
             export_format=str(settings.get("imageExportFormat", "原格式") or "原格式"),
         )
-        return item.to_dict()
+        payload = item.to_dict()
+        payload["image_size"] = len(data)
+        return payload
 
     def _pdf_small_image_items(self, file: dict[str, Any], task: dict[str, Any], path: Path, seed: int) -> list[dict[str, Any]]:
         """Extract small-image items from PDF image descriptors."""
@@ -9048,7 +10469,10 @@ class TaskProcessor:
                 export_message="" if asset_url else "PDF 图片原始流无法直接导出，可保留报告记录",
                 export_format=str(settings.get("imageExportFormat", "原格式") or "原格式"),
             )
-            items.append(item.to_dict())
+            payload = item.to_dict()
+            if asset_url:
+                payload["image_size"] = len(stream)
+            items.append(payload)
         if has_sized_descriptor:
             return items
         return items or self._pdf_image_placeholders(file, seed)

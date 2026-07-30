@@ -188,6 +188,10 @@ class OmmlDependencyItem:
     found_status: str = "未找到"
     copy_status: str = "跳过"
     error_message: str = ""
+    source_size: int = 0
+    source_sha256: str = ""
+    target_size: int = 0
+    target_sha256: str = ""
     id: str = field(default_factory=lambda: new_id("omml"))
     created_at: str = field(default_factory=utc_now)
 

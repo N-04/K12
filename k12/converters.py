@@ -12,8 +12,15 @@ import html
 import posixpath
 import re
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Any
+
+
+PDF_TEXT_SOURCE_LIMIT_BYTES = 50 * 1024 * 1024
+PDF_TEXT_STREAM_LIMIT_BYTES = 10 * 1024 * 1024
+PDF_TEXT_TOTAL_STREAM_LIMIT_BYTES = 25 * 1024 * 1024
+PDF_TEXT_STREAM_COUNT_LIMIT = 1000
 
 
 def extract_docx_blocks(path: Path) -> list[dict[str, Any]]:
@@ -206,6 +213,62 @@ def build_docx_from_slides(
             for item in notes:
                 paragraphs.append({"text": item, "style": "Normal"})
     build_docx(paragraphs, target)
+
+
+def extract_pdf_text_blocks(path: Path) -> list[dict[str, Any]]:
+    """Extract text-showing operands from plain or Flate-compressed PDF streams."""
+    if path.stat().st_size > PDF_TEXT_SOURCE_LIMIT_BYTES:
+        return []
+    data = path.read_bytes()
+    streams = [data]
+    expanded_total = 0
+    for index, match in enumerate(re.finditer(rb"<<(.*?)>>\s*stream\r?\n(.*?)\r?\nendstream", data, re.DOTALL), start=1):
+        if index > PDF_TEXT_STREAM_COUNT_LIMIT:
+            return []
+        dictionary, stream = match.groups()
+        if b"/FlateDecode" in dictionary:
+            try:
+                stream = _bounded_flate_decode(stream, PDF_TEXT_STREAM_LIMIT_BYTES)
+            except zlib.error:
+                continue
+            if stream is None:
+                return []
+        elif len(stream) > PDF_TEXT_STREAM_LIMIT_BYTES:
+            return []
+        expanded_total += len(stream)
+        if expanded_total > PDF_TEXT_TOTAL_STREAM_LIMIT_BYTES:
+            return []
+        streams.append(stream)
+    lines: list[str] = []
+    for stream in streams:
+        text_objects = re.findall(rb"BT(.*?)ET", stream, re.DOTALL) or [stream]
+        for text_object in text_objects:
+            values: list[str] = []
+            for array, literal, hexadecimal in re.findall(
+                rb"(\[(?:.|\r|\n)*?\])\s*TJ|((?:\((?:\\.|[^\\()])*\)\s*)+)Tj|<([0-9A-Fa-f\s]+)>\s*Tj",
+                text_object,
+            ):
+                if array:
+                    values.extend(_pdf_array_strings(array))
+                elif literal:
+                    values.extend(_pdf_literal_strings(literal))
+                elif hexadecimal:
+                    values.append(_decode_pdf_hex_string(hexadecimal))
+            line = " ".join(value for value in values if value).strip()
+            if line:
+                lines.append(re.sub(r"\s+", " ", line))
+    unique_lines = list(dict.fromkeys(lines))
+    return [{"text": line, "style": "Normal"} for line in unique_lines]
+
+
+def build_docx_from_pdf_text(path: Path, target: Path, title: str = "") -> dict[str, Any]:
+    """Create a DOCX from an extractable PDF text layer and return conversion evidence."""
+    blocks = extract_pdf_text_blocks(path)
+    if not blocks:
+        raise ValueError("PDF 文本层未提取到可写入内容")
+    paragraphs = [{"text": title or path.stem, "style": "Heading1"}, *blocks]
+    build_docx(paragraphs, target)
+    return {"paragraph_count": len(blocks), "character_count": sum(len(item["text"]) for item in blocks)}
 
 
 def build_pdf_from_xlsx(sheets: list[dict[str, Any]], target: Path, title: str) -> None:
@@ -590,6 +653,99 @@ def _pdf_pages(lines: list[str], page_size: int) -> list[list[str]]:
     if current:
         pages.append(current)
     return pages or [["K12 Export"]]
+
+
+def _pdf_array_strings(value: bytes) -> list[str]:
+    """Decode literal and hexadecimal strings inside one PDF TJ array."""
+    fragments: list[str] = []
+    for match in re.finditer(rb"\((?:\\.|[^\\()])*\)|<([0-9A-Fa-f\s]+)>", value):
+        token = match.group(0)
+        if token.startswith(b"("):
+            decoded = _pdf_literal_strings(token)
+            fragments.extend(decoded)
+        else:
+            fragments.append(_decode_pdf_hex_string(match.group(1)))
+    text = "".join(fragment for fragment in fragments if fragment)
+    return [text] if text else []
+
+
+def _bounded_flate_decode(value: bytes, limit: int) -> bytes | None:
+    """Decode one Flate stream without allowing output beyond the configured limit."""
+    decoder = zlib.decompressobj()
+    output = decoder.decompress(value, limit + 1)
+    if len(output) > limit or decoder.unconsumed_tail:
+        return None
+    remaining = limit + 1 - len(output)
+    output += decoder.flush(remaining)
+    if len(output) > limit or not decoder.eof:
+        return None
+    return output
+
+
+def _pdf_literal_strings(value: bytes) -> list[str]:
+    """Decode balanced PDF literal strings including escapes and octal bytes."""
+    results: list[str] = []
+    index = 0
+    while index < len(value):
+        if value[index] != 40:
+            index += 1
+            continue
+        index += 1
+        depth = 1
+        decoded = bytearray()
+        while index < len(value) and depth:
+            byte = value[index]
+            if byte == 92:
+                index += 1
+                if index >= len(value):
+                    break
+                escaped = value[index]
+                escape_map = {110: 10, 114: 13, 116: 9, 98: 8, 102: 12, 40: 40, 41: 41, 92: 92}
+                if 48 <= escaped <= 55:
+                    digits = bytes([escaped])
+                    while len(digits) < 3 and index + 1 < len(value) and 48 <= value[index + 1] <= 55:
+                        index += 1
+                        digits += bytes([value[index]])
+                    decoded.append(int(digits, 8))
+                elif escaped in (10, 13):
+                    if escaped == 13 and index + 1 < len(value) and value[index + 1] == 10:
+                        index += 1
+                else:
+                    decoded.append(escape_map.get(escaped, escaped))
+            elif byte == 40:
+                depth += 1
+                decoded.append(byte)
+            elif byte == 41:
+                depth -= 1
+                if depth:
+                    decoded.append(byte)
+            else:
+                decoded.append(byte)
+            index += 1
+        results.append(_decode_pdf_text_bytes(bytes(decoded)))
+    return results
+
+
+def _decode_pdf_hex_string(value: bytes) -> str:
+    """Decode a PDF hexadecimal string with UTF-16 BOM support."""
+    compact = re.sub(rb"\s+", b"", value)
+    if len(compact) % 2:
+        compact += b"0"
+    try:
+        return _decode_pdf_text_bytes(bytes.fromhex(compact.decode("ascii")))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+
+
+def _decode_pdf_text_bytes(value: bytes) -> str:
+    """Decode common PDF text bytes without requiring an external PDF engine."""
+    if value.startswith((b"\xfe\xff", b"\xff\xfe")):
+        encoding = "utf-16-be" if value.startswith(b"\xfe\xff") else "utf-16-le"
+        return value[2:].decode(encoding, errors="replace").strip()
+    try:
+        return value.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return value.decode("latin-1", errors="replace").strip()
 
 
 def _pdf_line_chunks(line: str, width: int = 92) -> list[str]:

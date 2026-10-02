@@ -1,10 +1,4 @@
-"""Core data models and task labels for the K12 workbench.
-
-These dataclasses define the normalized records that move through upload,
-task creation, formula processing, macro planning, image scanning, and report
-generation. They stay lightweight so persistence and API redaction remain
-explicit in the store and server layers.
-"""
+"""定义 K12 的核心数据模型和任务标签。规范上传、任务、公式、宏、图片和报告记录；持久化及接口脱敏分别由存储层和服务层负责。"""
 
 from __future__ import annotations
 
@@ -49,18 +43,18 @@ LOCAL_REQUIRED_TASKS = {
 
 
 def utc_now() -> str:
-    """Return an ISO timestamp in UTC for persisted runtime records."""
+    """返回用于持久化记录的 UTC ISO 时间戳。"""
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 def new_id(prefix: str) -> str:
-    """Create a short opaque identifier with a stable record prefix."""
+    """生成带稳定记录前缀的简短不透明标识。"""
     return f"{prefix}_{uuid4().hex[:12]}"
 
 
 @dataclass(slots=True)
 class FileItem:
-    """Uploaded or discovered file metadata used by task planning."""
+    """用于任务规划的上传或发现文件元数据。"""
 
     file_name: str
     file_type: str
@@ -90,13 +84,13 @@ class FileItem:
     created_at: str = field(default_factory=utc_now)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize file metadata for storage, reports, and API payloads."""
+        """将当前记录及计算字段序列化为存储、报告和接口使用的字典。"""
         return asdict(self)
 
 
 @dataclass(slots=True)
 class Task:
-    """Processing task metadata shared by queues, reports, and the UI."""
+    """队列、报告与界面共享的处理任务元数据。"""
 
     task_type: str
     execute_mode: str
@@ -119,7 +113,7 @@ class Task:
     created_at: str = field(default_factory=utc_now)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize task metadata with the PRD-facing display label."""
+        """将当前记录及计算字段序列化为存储、报告和接口使用的字典。"""
         data = asdict(self)
         data["task_label"] = TASK_LABELS.get(self.task_type, self.task_type)
         return data
@@ -127,7 +121,7 @@ class Task:
 
 @dataclass(slots=True)
 class FormulaItem:
-    """Normalized formula record from Word, PPT, PDF, LaTeX, or Mathpix."""
+    """来自 Word、PPT、PDF、LaTeX 或 Mathpix 的规范公式记录。"""
 
     file_id: str
     page_index: int
@@ -146,13 +140,13 @@ class FormulaItem:
     fallback_position: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize formula metadata for reports and formula exports."""
+        """将当前记录及计算字段序列化为存储、报告和接口使用的字典。"""
         return asdict(self)
 
 
 @dataclass(slots=True)
 class MacroItem:
-    """Word macro selection metadata for ordered local execution plans."""
+    """供有序本地执行计划使用的 Word 宏选择元数据。"""
 
     macro_name: str
     macro_source: str
@@ -172,13 +166,13 @@ class MacroItem:
     id: str = field(default_factory=lambda: new_id("macro"))
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize macro execution planning metadata."""
+        """将当前记录及计算字段序列化为存储、报告和接口使用的字典。"""
         return asdict(self)
 
 
 @dataclass(slots=True)
 class OmmlDependencyItem:
-    """OMML dependency lookup and copy status for local MathType handoff."""
+    """本地 MathType 交接所需的 OMML 依赖查找与复制状态。"""
 
     file_id: str
     document_path: str
@@ -196,13 +190,13 @@ class OmmlDependencyItem:
     created_at: str = field(default_factory=utc_now)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize OMML dependency lookup and copy status."""
+        """将当前记录及计算字段序列化为存储、报告和接口使用的字典。"""
         return asdict(self)
 
 
 @dataclass(slots=True)
 class SmallImageItem:
-    """Detected small image metadata for image reports and manual review."""
+    """图片报告与手动审阅使用的小图片元数据。"""
 
     file_id: str
     page_index: int
@@ -235,11 +229,11 @@ class SmallImageItem:
 
     @property
     def area(self) -> int:
-        """Return pixel area used by micro-image filters."""
+        """返回小图片筛选所用的像素面积。"""
         return self.width * self.height
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize small-image metadata with computed area."""
+        """将当前记录及计算字段序列化为存储、报告和接口使用的字典。"""
         data = asdict(self)
         data["area"] = self.area
         return data
@@ -247,7 +241,7 @@ class SmallImageItem:
 
 @dataclass(slots=True)
 class ReportItem:
-    """Persisted report counters and artifact path for one completed task."""
+    """完成任务的已保存报告计数与产物引用。"""
 
     task_id: str
     file_id: str
@@ -268,5 +262,5 @@ class ReportItem:
     created_at: str = field(default_factory=utc_now)
 
     def to_dict(self) -> dict[str, Any]:
-        """Serialize report counters and artifact references."""
+        """将当前记录及计算字段序列化为存储、报告和接口使用的字典。"""
         return asdict(self)

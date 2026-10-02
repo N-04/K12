@@ -7,4 +7,6 @@ __pycache__/
 htmlcov/
 node_modules/
 dist/
-
+.test-tmp/
+.windows-original-backup/
+windows-*.log

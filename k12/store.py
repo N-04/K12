@@ -1,9 +1,4 @@
-"""SQLite-backed runtime store for the K12 local-first workbench.
-
-The store keeps uploads, reports, outputs, settings, users, authorizations, and
-annotation records under one data directory. Passwords and sensitive local paths
-are handled as runtime data; public redaction happens at the API layer.
-"""
+"""使用 SQLite 保存本地运行数据。在同一目录管理上传、报告、输出、设置、用户、授权和标注。密码仅保存在进程内存；公开数据在接口层脱敏。"""
 
 from __future__ import annotations
 
@@ -218,11 +213,22 @@ DEFAULT_AUTHORIZATIONS: dict[str, dict[str, Any]] = {
 }
 
 
+class ClosingConnection(sqlite3.Connection):
+    """事务结束时关闭连接，及时释放 Windows 上的数据库文件句柄。"""
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        """先提交或回滚事务，再释放连接，即使事务处理失败也关闭句柄。"""
+        try:
+            return super().__exit__(exc_type, exc_value, traceback)
+        finally:
+            self.close()
+
+
 class AppStore:
-    """Manage local runtime directories and SQLite records for one workspace."""
+    """管理工作空间运行目录及 SQLite 记录。"""
 
     def __init__(self, data_dir: Path | str = ".k12-data") -> None:
-        """Create managed runtime folders and initialize the SQLite schema."""
+        """创建受管运行目录并初始化 SQLite 表结构。"""
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.reports_dir = self.data_dir / "reports"
@@ -246,13 +252,13 @@ class AppStore:
         self._reset_password_sessions()
 
     def connect(self) -> sqlite3.Connection:
-        """Open a SQLite connection with row objects for store methods."""
-        conn = sqlite3.connect(self.db_path)
+        """打开带行对象的 SQLite 连接，事务退出时自动关闭。"""
+        conn = sqlite3.connect(self.db_path, factory=ClosingConnection)
         conn.row_factory = sqlite3.Row
         return conn
 
     def _init_db(self) -> None:
-        """Create or migrate all local tables required by the PRD workflows."""
+        """创建或迁移需求工作流所需的本地表。"""
         with self._lock, self.connect() as conn:
             conn.executescript(
                 """
@@ -355,14 +361,14 @@ class AppStore:
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
-        """Add one SQLite column when older local stores are missing it."""
+        """旧存储缺少 SQLite 列时补充该列。"""
         columns = {row["name"] for row in conn.execute(f"pragma table_info({table})").fetchall()}
         if column not in columns:
             conn.execute(f"alter table {table} add column {column} {definition}")
 
     @staticmethod
     def _ensure_default_users(conn: sqlite3.Connection) -> None:
-        """Seed the local administrator when a fresh runtime store has no users."""
+        """新存储没有用户时创建本地管理员。"""
         count = conn.execute("select count(*) as count from users").fetchone()["count"]
         if count:
             return
@@ -385,7 +391,7 @@ class AppStore:
 
     @staticmethod
     def _ensure_default_authorizations(conn: sqlite3.Connection) -> None:
-        """Seed explicit authorization toggles for Mathpix, sync, macros, and paths."""
+        """初始化 Mathpix、同步、宏和路径的明确授权开关。"""
         now = utc_now()
         for key, value in DEFAULT_AUTHORIZATIONS.items():
             payload = {
@@ -403,7 +409,7 @@ class AppStore:
             )
 
     def _log_category_enabled(self, category: str) -> bool:
-        """Return whether a log category should be persisted under current settings."""
+        """判断当前设置是否允许保存指定类别日志。"""
         setting_key = {
             "upload": "logUploadEvents",
             "conversion": "logConversionEvents",
@@ -418,7 +424,7 @@ class AppStore:
         return bool(self.get_settings().get(setting_key, True))
 
     def save_file(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist one file payload exactly as analyzed by the processor."""
+        """原样保存处理器分析的文件载荷。"""
         with self._lock, self.connect() as conn:
             conn.execute(
                 "insert or replace into files (id, payload, created_at) values (?, ?, ?)",
@@ -427,7 +433,7 @@ class AppStore:
         return payload
 
     def replace_file(self, file_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """Replace one uploaded file record and remove old cached upload entries."""
+        """替换上传文件记录并清除旧上传缓存条目。"""
         with self._lock, self.connect() as conn:
             rows = conn.execute("select payload from files").fetchall()
             all_payloads = [json.loads(row["payload"]) for row in rows]
@@ -455,19 +461,19 @@ class AppStore:
         return payload
 
     def get_file(self, file_id: str) -> dict[str, Any] | None:
-        """Return one stored file payload by id."""
+        """按标识返回已存文件载荷。"""
         with self._lock, self.connect() as conn:
             row = conn.execute("select payload from files where id = ?", (file_id,)).fetchone()
         return json.loads(row["payload"]) if row else None
 
     def list_files(self) -> list[dict[str, Any]]:
-        """Return stored files newest first."""
+        """按新到旧顺序返回文件记录。"""
         with self._lock, self.connect() as conn:
             rows = conn.execute("select payload from files order by created_at desc").fetchall()
         return [json.loads(row["payload"]) for row in rows]
 
     def delete_file(self, file_id: str) -> bool:
-        """Delete a file record plus archive children and managed upload cache."""
+        """删除文件记录及受控上传缓存。"""
         payloads: list[dict[str, Any]] = []
         with self._lock, self.connect() as conn:
             rows = conn.execute("select payload from files").fetchall()
@@ -487,7 +493,7 @@ class AppStore:
         return True
 
     def set_file_password(self, file_id: str, password: str) -> dict[str, Any]:
-        """Store an encrypted-file password only for the current local process."""
+        """仅在内存中保存加密文件会话密码。"""
         if not password:
             raise ValueError("密码不能为空")
         payload = self.get_file(file_id)
@@ -510,11 +516,11 @@ class AppStore:
         return self.save_file(payload)
 
     def has_file_password(self, file_id: str) -> bool:
-        """Return whether a runtime-only password exists for the file."""
+        """检查文件是否存在仅在进程内有效的密码。"""
         return file_id in self._file_passwords
 
     def save_task(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist a task payload while refreshing duration metadata."""
+        """保存任务载荷并更新持续时间信息。"""
         now = utc_now()
         payload = self._task_with_duration(payload, now)
         with self._lock, self.connect() as conn:
@@ -529,7 +535,7 @@ class AppStore:
 
     @staticmethod
     def _task_with_duration(payload: dict[str, Any], now: str) -> dict[str, Any]:
-        """Attach elapsed-time fields without mutating the stored task payload."""
+        """附加耗时字段，不修改已保存任务载荷。"""
         enriched = dict(payload)
         start = AppStore._parse_timestamp(enriched.get("start_time"))
         end = AppStore._parse_timestamp(enriched.get("end_time")) or AppStore._parse_timestamp(now)
@@ -543,7 +549,7 @@ class AppStore:
 
     @staticmethod
     def _parse_timestamp(value: Any) -> datetime | None:
-        """Parse task timestamps while accepting missing or malformed values."""
+        """解析任务时间戳，容忍缺失或格式错误。"""
         if not value:
             return None
         try:
@@ -556,7 +562,7 @@ class AppStore:
 
     @staticmethod
     def _duration_label(seconds: int) -> str:
-        """Format a non-negative duration for task tables and reports."""
+        """为任务表与报告格式化非负持续时间。"""
         seconds = max(0, int(seconds or 0))
         hours, remainder = divmod(seconds, 3600)
         minutes, secs = divmod(remainder, 60)
@@ -567,20 +573,20 @@ class AppStore:
         return f"{secs}秒"
 
     def get_task(self, task_id: str) -> dict[str, Any] | None:
-        """Return one task payload with current duration metadata."""
+        """返回含当前耗时信息的任务载荷。"""
         with self._lock, self.connect() as conn:
             row = conn.execute("select payload from tasks where id = ?", (task_id,)).fetchone()
         return self._task_with_duration(json.loads(row["payload"]), utc_now()) if row else None
 
     def list_tasks(self) -> list[dict[str, Any]]:
-        """Return all tasks newest-updated first with current duration metadata."""
+        """按最近更新时间返回含耗时信息的任务。"""
         with self._lock, self.connect() as conn:
             rows = conn.execute("select payload from tasks order by updated_at desc").fetchall()
         now = utc_now()
         return [self._task_with_duration(json.loads(row["payload"]), now) for row in rows]
 
     def delete_task_history(self, task_id: str, delete_outputs: bool = True) -> dict[str, Any]:
-        """Delete a task, its reports, annotations, logs, and managed runtime files."""
+        """删除任务、报告、标注、日志及受管运行文件。"""
         reports: list[dict[str, Any]] = []
         with self._lock, self.connect() as conn:
             rows = conn.execute("select payload from reports where task_id = ?", (task_id,)).fetchall()
@@ -607,7 +613,7 @@ class AppStore:
         }
 
     def save_report(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist one report payload and its task association."""
+        """保存报告载荷及任务关联。"""
         with self._lock, self.connect() as conn:
             conn.execute(
                 "insert or replace into reports (id, task_id, payload, created_at) values (?, ?, ?, ?)",
@@ -616,19 +622,19 @@ class AppStore:
         return payload
 
     def get_report(self, report_id: str) -> dict[str, Any] | None:
-        """Return one report payload by id."""
+        """按标识返回报告载荷。"""
         with self._lock, self.connect() as conn:
             row = conn.execute("select payload from reports where id = ?", (report_id,)).fetchone()
         return json.loads(row["payload"]) if row else None
 
     def list_reports(self) -> list[dict[str, Any]]:
-        """Return stored reports newest first."""
+        """按新到旧顺序返回报告。"""
         with self._lock, self.connect() as conn:
             rows = conn.execute("select payload from reports order by created_at desc, rowid desc").fetchall()
         return [json.loads(row["payload"]) for row in rows]
 
     def delete_report(self, report_id: str) -> dict[str, Any]:
-        """Delete one report, report artifacts, image cache, and annotations."""
+        """删除报告及其衍生审阅记录。"""
         with self._lock, self.connect() as conn:
             row = conn.execute("select payload from reports where id = ?", (report_id,)).fetchone()
             if not row:
@@ -649,7 +655,7 @@ class AppStore:
         }
 
     def append_log(self, task_id: str, message: str, level: str = "info", category: str = "system") -> None:
-        """Append a log entry when history and category settings allow it."""
+        """历史记录和类别设置允许时附加日志。"""
         category = str(category or "system")
         if level == "error" and category == "system":
             category = "error"
@@ -666,7 +672,7 @@ class AppStore:
             )
 
     def list_logs(self, task_id: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
-        """Return global or task-specific logs newest first."""
+        """按新到旧顺序返回系统或指定任务日志。"""
         with self._lock, self.connect() as conn:
             if task_id:
                 rows = conn.execute(
@@ -681,7 +687,7 @@ class AppStore:
         return [dict(row) for row in rows]
 
     def get_settings(self) -> dict[str, Any]:
-        """Return settings with PDF-to-Word normalized to Mathpix."""
+        """返回设置并将 PDF 转 Word 引擎规范为 Mathpix。"""
         with self._lock, self.connect() as conn:
             rows = conn.execute("select key, value from settings").fetchall()
         settings = {row["key"]: json.loads(row["value"]) for row in rows}
@@ -689,7 +695,7 @@ class AppStore:
         return settings
 
     def output_base_dir(self) -> Path:
-        """Return and create the configured output base directory."""
+        """返回配置的输出根目录，必要时创建。"""
         raw = str(self.get_settings().get("outputDirectory") or "outputs").strip() or "outputs"
         path = Path(raw).expanduser()
         if not path.is_absolute():
@@ -698,13 +704,13 @@ class AppStore:
         return path
 
     def output_task_dir(self, task_id: str) -> Path:
-        """Return and create the output directory for one task."""
+        """返回任务输出目录，必要时创建。"""
         path = self.output_base_dir() / task_id
         path.mkdir(parents=True, exist_ok=True)
         return path
 
     def update_settings(self, patch: dict[str, Any]) -> dict[str, Any]:
-        """Persist valid settings while forcing the PDF engine to Mathpix."""
+        """保存有效设置，并强制将 PDF 转 Word 引擎设为 Mathpix。"""
         valid_keys = set(DEFAULT_SETTINGS)
         with self._lock, self.connect() as conn:
             for key, value in patch.items():
@@ -722,7 +728,7 @@ class AppStore:
         retention_days: int = 30,
         log_retention_days: int | None = None,
     ) -> dict[str, Any]:
-        """Delete expired task/report/log history and managed runtime artifacts."""
+        """清理过期任务、报告、日志和受管运行缓存。"""
         retention_days = max(0, int(retention_days))
         log_retention_days = retention_days if log_retention_days is None else max(0, int(log_retention_days))
         now = datetime.now(timezone.utc)
@@ -797,7 +803,7 @@ class AppStore:
         return deleted
 
     def save_macro_template(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist a reusable Word macro execution-order template."""
+        """校验并保存可复用的有序宏序列。"""
         now = utc_now()
         template = {
             "id": str(payload.get("id") or new_id("macro_tpl")),
@@ -819,25 +825,25 @@ class AppStore:
         return template
 
     def get_macro_template(self, template_id: str) -> dict[str, Any] | None:
-        """Return one macro template by id."""
+        """按标识返回宏模板。"""
         with self._lock, self.connect() as conn:
             row = conn.execute("select payload from macro_templates where id = ?", (template_id,)).fetchone()
         return json.loads(row["payload"]) if row else None
 
     def list_macro_templates(self) -> list[dict[str, Any]]:
-        """Return macro templates newest-updated first."""
+        """返回已保存的宏执行顺序模板。"""
         with self._lock, self.connect() as conn:
             rows = conn.execute("select payload from macro_templates order by updated_at desc").fetchall()
         return [json.loads(row["payload"]) for row in rows]
 
     def delete_macro_template(self, template_id: str) -> bool:
-        """Delete one macro sequence template by id."""
+        """删除已保存的宏执行顺序模板。"""
         with self._lock, self.connect() as conn:
             cur = conn.execute("delete from macro_templates where id = ?", (template_id,))
         return cur.rowcount > 0
 
     def save_user(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist a local user with role-derived permissions."""
+        """保存本地用户，并按角色派生权限。"""
         now = utc_now()
         role = str(payload.get("role") or "学生")
         if role not in ROLE_PERMISSIONS:
@@ -870,25 +876,25 @@ class AppStore:
         return user
 
     def get_user(self, user_id: str) -> dict[str, Any] | None:
-        """Return one local user by id."""
+        """按标识返回本地用户。"""
         with self._lock, self.connect() as conn:
             row = conn.execute("select payload from users where id = ?", (user_id,)).fetchone()
         return json.loads(row["payload"]) if row else None
 
     def list_users(self) -> list[dict[str, Any]]:
-        """Return local users newest-updated first."""
+        """返回本地用户及角色权限、激活状态。"""
         with self._lock, self.connect() as conn:
             rows = conn.execute("select payload from users order by updated_at desc").fetchall()
         return [json.loads(row["payload"]) for row in rows]
 
     def delete_user(self, user_id: str) -> bool:
-        """Delete one local user by id."""
+        """按标识删除本地用户记录。"""
         with self._lock, self.connect() as conn:
             cur = conn.execute("delete from users where id = ?", (user_id,))
         return cur.rowcount > 0
 
     def save_template(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist a conversion or OCR template descriptor."""
+        """保存可复用模板并同步相关默认设置。"""
         now = utc_now()
         template_id = str(payload.get("id") or new_id("tpl"))
         with self._lock, self.connect() as conn:
@@ -917,19 +923,19 @@ class AppStore:
         return template
 
     def list_templates(self) -> list[dict[str, Any]]:
-        """Return general templates newest-updated first."""
+        """返回转换、OCR 和公式模板记录。"""
         with self._lock, self.connect() as conn:
             rows = conn.execute("select payload from templates order by updated_at desc").fetchall()
         return [json.loads(row["payload"]) for row in rows]
 
     def delete_template(self, template_id: str) -> bool:
-        """Delete one general template by id."""
+        """删除可复用模板记录。"""
         with self._lock, self.connect() as conn:
             cur = conn.execute("delete from templates where id = ?", (template_id,))
         return cur.rowcount > 0
 
     def save_authorization(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist one explicit authorization toggle such as Mathpix upload."""
+        """更新敏感功能的明确授权及对应设置。"""
         key = str(payload.get("key") or "")
         if not key:
             raise ValueError("授权项 key 不能为空")
@@ -963,7 +969,7 @@ class AppStore:
         return authorization
 
     def list_authorizations(self) -> list[dict[str, Any]]:
-        """Return authorization records, creating defaults when missing."""
+        """返回与当前设置同步的授权开关。"""
         with self._lock, self.connect() as conn:
             rows = conn.execute("select payload from authorizations order by key").fetchall()
         existing = {item["key"]: item for item in (json.loads(row["payload"]) for row in rows)}
@@ -973,7 +979,7 @@ class AppStore:
         return [existing[key] for key in sorted(existing)]
 
     def save_image_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist manual review or replacement metadata for one extracted image."""
+        """校验并保存手动小图片审阅决定。"""
         now = utc_now()
         image_id = str(payload.get("image_id") or "")
         report_id = str(payload.get("report_id") or "")
@@ -1012,7 +1018,7 @@ class AppStore:
         return annotation
 
     def list_image_annotations(self, report_id: str | None = None) -> list[dict[str, Any]]:
-        """Return image annotations globally or for one report."""
+        """返回全部或指定报告的图片审阅标注。"""
         with self._lock, self.connect() as conn:
             if report_id:
                 rows = conn.execute(
@@ -1024,13 +1030,13 @@ class AppStore:
         return [json.loads(row["payload"]) for row in rows]
 
     def delete_image_annotation(self, annotation_id: str) -> bool:
-        """Delete one image annotation by id."""
+        """删除图片审阅标注。"""
         with self._lock, self.connect() as conn:
             cur = conn.execute("delete from image_annotations where id = ?", (annotation_id,))
         return cur.rowcount > 0
 
     def save_formula_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist manual confirmation or correction for one formula."""
+        """校验并保存手动公式更正或确认。"""
         now = utc_now()
         formula_id = str(payload.get("formula_id") or "")
         report_id = str(payload.get("report_id") or "")
@@ -1068,7 +1074,7 @@ class AppStore:
         return annotation
 
     def list_formula_annotations(self, report_id: str | None = None) -> list[dict[str, Any]]:
-        """Return formula annotations globally or for one report."""
+        """返回全部或指定报告的公式审阅标注。"""
         with self._lock, self.connect() as conn:
             if report_id:
                 rows = conn.execute(
@@ -1080,13 +1086,13 @@ class AppStore:
         return [json.loads(row["payload"]) for row in rows]
 
     def delete_formula_annotation(self, annotation_id: str) -> bool:
-        """Delete one formula annotation by id."""
+        """删除公式审阅标注。"""
         with self._lock, self.connect() as conn:
             cur = conn.execute("delete from formula_annotations where id = ?", (annotation_id,))
         return cur.rowcount > 0
 
     def save_omml_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist OMML keep/retry/manual-dependency correction metadata."""
+        """校验并保存 OMML 转换或依赖决定。"""
         now = utc_now()
         dependency_id = str(payload.get("dependency_id") or payload.get("dependencyId") or "")
         report_id = str(payload.get("report_id") or payload.get("reportId") or "")
@@ -1121,7 +1127,7 @@ class AppStore:
         return annotation
 
     def list_omml_annotations(self, report_id: str | None = None) -> list[dict[str, Any]]:
-        """Return OMML annotations globally or for one report."""
+        """返回全部或指定报告的 OMML 依赖标注。"""
         with self._lock, self.connect() as conn:
             if report_id:
                 rows = conn.execute(
@@ -1133,13 +1139,13 @@ class AppStore:
         return [json.loads(row["payload"]) for row in rows]
 
     def delete_omml_annotation(self, annotation_id: str) -> bool:
-        """Delete one OMML annotation by id."""
+        """删除 OMML 依赖标注。"""
         with self._lock, self.connect() as conn:
             cur = conn.execute("delete from omml_annotations where id = ?", (annotation_id,))
         return cur.rowcount > 0
 
     def save_layout_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist a report layout-quality correction note."""
+        """校验并保存手动排版更正备注。"""
         now = utc_now()
         report_id = str(payload.get("report_id") or payload.get("reportId") or "")
         location = str(payload.get("location") or payload.get("position") or "").strip()
@@ -1176,7 +1182,7 @@ class AppStore:
         return annotation
 
     def list_layout_annotations(self, report_id: str | None = None) -> list[dict[str, Any]]:
-        """Return layout annotations globally or for one report."""
+        """返回全部或指定报告的排版更正备注。"""
         with self._lock, self.connect() as conn:
             if report_id:
                 rows = conn.execute(
@@ -1188,13 +1194,13 @@ class AppStore:
         return [json.loads(row["payload"]) for row in rows]
 
     def delete_layout_annotation(self, annotation_id: str) -> bool:
-        """Delete one layout annotation by id."""
+        """删除排版更正备注。"""
         with self._lock, self.connect() as conn:
             cur = conn.execute("delete from layout_annotations where id = ?", (annotation_id,))
         return cur.rowcount > 0
 
     def _cleanup_uploaded_payloads(self, payloads: list[dict[str, Any]]) -> None:
-        """Remove managed upload cache files without touching external source paths."""
+        """清理受管上传缓存，不操作外部源路径。"""
         upload_root = self.uploads_dir.resolve()
         archive_dirs: set[Path] = set()
         for payload in payloads:
@@ -1213,7 +1219,7 @@ class AppStore:
                     try:
                         resolved.unlink()
                     except OSError:
-                        # Best-effort cleanup should not block record deletion.
+                        # 尽力清理文件，清理失败不阻止删除记录。
                         pass
             if source_kind == "upload":
                 archive_dirs.add(self.uploads_dir / str(payload.get("id") or ""))
@@ -1231,7 +1237,7 @@ class AppStore:
 
     @staticmethod
     def _parse_cleanup_timestamp(value: str) -> datetime | None:
-        """Parse cleanup cutoff timestamps into UTC for retention comparisons."""
+        """将清理截止时间解析为 UTC 供保留期比较。"""
         try:
             parsed = datetime.fromisoformat(value)
         except ValueError:
@@ -1242,17 +1248,17 @@ class AppStore:
 
     @classmethod
     def _timestamp_at_or_before(cls, value: str, cutoff: datetime) -> bool:
-        """Return whether one cleanup timestamp is at or before a UTC cutoff."""
+        """判断清理时间是否早于或等于 UTC 截止时间。"""
         parsed = cls._parse_cleanup_timestamp(value)
         return bool(parsed and parsed <= cutoff)
 
     @staticmethod
     def _sql_placeholders(values: set[str] | list[int]) -> str:
-        """Build a placeholder list for already non-empty id collections."""
+        """为非空标识集合生成 SQL 占位符列表。"""
         return ",".join("?" for _ in values)
 
     def _cleanup_report_files(self, reports: list[dict[str, Any]]) -> int:
-        """Delete report artifacts that stay inside the managed reports directory."""
+        """仅删除受管报告目录中的报告产物。"""
         report_root = self.reports_dir.resolve()
         deleted = 0
         for report in reports:
@@ -1270,12 +1276,12 @@ class AppStore:
                         resolved.unlink()
                         deleted += 1
                     except OSError:
-                        # Leave stubborn files for the next maintenance pass.
+                        # 无法删除的文件留待下次维护处理。
                         pass
         return deleted
 
     def _cleanup_report_image_files(self, report: dict[str, Any]) -> int:
-        """Delete cached report images that stay inside the managed image directory."""
+        """仅删除受管图片目录中的报告图片缓存。"""
         image_root = self.images_dir.resolve()
         deleted = 0
         for image in report.get("analysis", {}).get("smallImages", []):
@@ -1292,12 +1298,12 @@ class AppStore:
                     resolved.unlink()
                     deleted += 1
                 except OSError:
-                    # Report deletion should continue even if an image is locked.
+                    # 图片被占用时仍继续删除报告记录。
                     pass
         return deleted
 
     def _cleanup_runtime_dirs(self, task_ids: set[str]) -> dict[str, int]:
-        """Remove task-scoped output, backup, and image directories under managed roots."""
+        """删除受管根目录下按任务隔离的输出、备份和图片目录。"""
         counts = {"output_dirs_deleted": 0, "backup_dirs_deleted": 0, "image_dirs_deleted": 0}
         output_roots = [self._configured_output_base_dir(), self.outputs_dir]
         backup_roots = [self.backups_dir]
@@ -1314,14 +1320,14 @@ class AppStore:
         return counts
 
     def _configured_output_base_dir(self) -> Path:
-        """Resolve the configured output directory relative to the managed data dir."""
+        """相对于受管数据目录解析配置的输出目录。"""
         raw = str(self.get_settings().get("outputDirectory") or "outputs").strip() or "outputs"
         path = Path(raw).expanduser()
         return path if path.is_absolute() else self.data_dir / path
 
     @staticmethod
     def _remove_child_dir(root: Path, child_name: str) -> int:
-        """Remove one direct child directory only when it stays under the root."""
+        """仅删除仍位于根目录下的直接子目录。"""
         try:
             resolved_root = root.resolve()
             target = (root / child_name).resolve()
@@ -1334,7 +1340,7 @@ class AppStore:
         return 0 if target.exists() else 1
 
     def _reset_password_sessions(self) -> None:
-        """Clear runtime-only document passwords when a store instance starts."""
+        """存储实例启动时清空仅在进程内有效的文档密码。"""
         for payload in self.list_files():
             if not payload.get("password_session_active"):
                 continue

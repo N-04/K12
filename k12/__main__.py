@@ -1,4 +1,4 @@
-"""Command-line entry point for running the K12 local HTTP workbench."""
+"""启动 K12 本地 HTTP 工作台的命令行入口。"""
 
 from .server import main
 

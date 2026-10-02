@@ -1,11 +1,4 @@
-"""Business orchestration for K12 document analysis, tasks, and PRD evidence.
-
-TaskProcessor is the boundary between local runtime records, static frontend
-contracts, Mathpix OCR authorization, and desktop-only handoff plans. It may
-simulate safe standard-library conversions and produce verifiable contracts, but
-it does not claim real Office, MathType, OMML writeback, or Word macro execution
-unless a same-platform local client reports those results.
-"""
+"""负责文档分析、任务和需求验收证据的业务编排。连接本地记录、前端接口、Mathpix OCR 授权和桌面执行计划。除非同平台客户端回传结果，否则不声称执行了真实 Office、MathType、OMML 写回或 Word 宏。"""
 
 from __future__ import annotations
 
@@ -97,7 +90,7 @@ LOCAL_PATH_TEXT = re.compile(r"(/Users/[^\s，,;]+|/private/[^\s，,;]+|/var/fol
 
 
 def _pdf_image_descriptors(data: bytes, limit: int = 200) -> list[dict[str, Any]]:
-    """Extract bounded PDF image-object metadata without rendering page pixels."""
+    """在大小限制内提取 PDF 图片元数据，不渲染页面像素。"""
     descriptors: list[dict[str, Any]] = []
     for index, match in enumerate(re.finditer(rb"/Subtype\s*/Image", data), start=1):
         if len(descriptors) >= limit:
@@ -124,7 +117,7 @@ def _pdf_image_descriptors(data: bytes, limit: int = 200) -> list[dict[str, Any]
 
 
 def _pdf_stream_after(data: bytes, offset: int) -> bytes:
-    """Return the raw stream body that follows one PDF object dictionary."""
+    """返回 PDF 对象字典后面的原始流内容。"""
     next_obj = data.find(b"endobj", offset)
     search_end = next_obj if next_obj >= 0 else min(len(data), offset + 2_000_000)
     stream_start = data.find(b"stream", offset, search_end)
@@ -142,13 +135,13 @@ def _pdf_stream_after(data: bytes, offset: int) -> bytes:
 
 
 def _pdf_dict_int(dict_bytes: bytes, key: str) -> int:
-    """Read an integer value from a small PDF dictionary byte slice."""
+    """从小段 PDF 字典字节中读取整数。"""
     match = re.search(rb"/" + key.encode("ascii") + rb"\s+(\d+)", dict_bytes)
     return int(match.group(1)) if match else 0
 
 
 def _pdf_dict_name(dict_bytes: bytes, key: str) -> str:
-    """Read a direct or array-wrapped PDF name from dictionary bytes."""
+    """从字典字节读取直接名称或数组包装的名称。"""
     direct = re.search(rb"/" + key.encode("ascii") + rb"\s*/([A-Za-z0-9]+)", dict_bytes)
     if direct:
         return direct.group(1).decode("ascii", errors="ignore")
@@ -157,7 +150,7 @@ def _pdf_dict_name(dict_bytes: bytes, key: str) -> str:
 
 
 def _pdf_filter_image_type(filter_name: str) -> str:
-    """Map a PDF image filter name to the export-friendly image kind."""
+    """将 PDF 图片滤镜名称映射为可导出图片类型。"""
     normalized = filter_name.lower()
     if normalized == "dctdecode":
         return "jpg"
@@ -171,7 +164,7 @@ def _pdf_filter_image_type(filter_name: str) -> str:
 
 
 def _find_direct_omml_file(directory: Path) -> Path | None:
-    """Find an OMML conversion dependency directly beside a Word document."""
+    """查找目录中直接存在的 OMML 转换依赖文件。"""
     priority = ["omml2mml.xsl", "omml2mathml.xsl", "omml.xsl"]
     try:
         direct_files = {child.name.lower(): child for child in directory.iterdir() if child.is_file()}
@@ -187,20 +180,20 @@ def _find_direct_omml_file(directory: Path) -> Path | None:
 
 
 def _is_omml_dependency_name(file_name: str) -> bool:
-    """Return whether a file name looks like an OMML conversion dependency."""
+    """判断文件名是否符合 OMML 转换依赖命名规则。"""
     path = Path(file_name)
     return "omml" in path.name.lower() and path.suffix.lower() in OMML_DEPENDENCY_SUFFIXES
 
 
 class DocumentAnalyzer:
-    """Classify uploads and extract lightweight metadata used for planning."""
+    """分类上传文件并提取规划使用的轻量元数据。"""
 
     def __init__(self, single_file_limit_mb: int = 500) -> None:
-        """Set the upload-size limit used by metadata and byte-level analysis."""
+        """初始化当前对象所需的配置、依赖与运行状态。"""
         self.single_file_limit = single_file_limit_mb * 1024 * 1024
 
     def analyze_metadata(self, file_name: str, file_size: int, file_path: str = "") -> FileItem:
-        """Create a FileItem from browser metadata when file bytes are absent."""
+        """没有文件字节时，根据浏览器元数据创建文件记录。"""
         extension = Path(file_name).suffix.lower()
         file_type = self.classify_extension(extension)
         digest = self._digest(file_name, str(file_size), extension)
@@ -233,7 +226,7 @@ class DocumentAnalyzer:
         return item
 
     def analyze_file(self, path: Path, display_name: str | None = None) -> FileItem:
-        """Inspect an uploaded local file and enrich format-specific metadata."""
+        """检查上传的本地文件并补充格式专用元数据。"""
         file_name = display_name or path.name
         item = self.analyze_metadata(file_name, path.stat().st_size, str(path))
         item.storage_path = str(path)
@@ -249,7 +242,7 @@ class DocumentAnalyzer:
         return item
 
     def validate(self, file_name: str, file_size: int, extension: str) -> list[str]:
-        """Return upload validation errors without mutating runtime state."""
+        """返回上传校验错误，不修改运行状态。"""
         errors: list[str] = []
         if not file_name.strip():
             errors.append("文件名不能为空")
@@ -265,7 +258,7 @@ class DocumentAnalyzer:
 
     @staticmethod
     def supported_extensions() -> set[str]:
-        """Return every extension accepted by the PRD upload flow."""
+        """返回需求规定的上传流程支持的扩展名。"""
         merged: set[str] = set()
         for values in SUPPORTED_EXTENSIONS.values():
             merged.update(values)
@@ -273,7 +266,7 @@ class DocumentAnalyzer:
 
     @staticmethod
     def classify_extension(extension: str) -> str:
-        """Map a file extension to the UI-facing document type label."""
+        """将扩展名映射为界面文档类型标签。"""
         for label, extensions in SUPPORTED_EXTENSIONS.items():
             if extension in extensions:
                 return {
@@ -288,12 +281,12 @@ class DocumentAnalyzer:
 
     @staticmethod
     def _digest(*parts: str) -> str:
-        """Build a stable metadata digest for deterministic sample counts."""
+        """生成稳定元数据摘要，用于确定性样本统计。"""
         text = "::".join(parts)
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
     def _analyze_ooxml(self, path: Path, item: FileItem) -> None:
-        """Inspect a supported OOXML ZIP package and enrich the file item."""
+        """检查支持的 OOXML ZIP 包并补充文件记录。"""
         if self._looks_encrypted_office_container(path):
             item.encrypted = True
             self._clear_unreadable_office_capabilities(item)
@@ -328,7 +321,7 @@ class DocumentAnalyzer:
             item.status = "校验失败"
 
     def _analyze_legacy_office(self, path: Path, item: FileItem) -> None:
-        """Validate a legacy Office OLE container before local-client handoff."""
+        """交接本地客户端前校验旧 Office OLE 容器。"""
         self._clear_unreadable_office_capabilities(item)
         try:
             with path.open("rb") as handle:
@@ -367,7 +360,7 @@ class DocumentAnalyzer:
 
     @staticmethod
     def _legacy_office_header_error(data: bytes) -> str:
-        """Return a validation error for an invalid legacy Office CFB header."""
+        """返回旧 Office CFB 头无效的校验错误。"""
         if len(data) < 512 or not data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
             return "文件损坏或不是有效的旧版 Office OLE 文档"
         if data[28:30] != b"\xfe\xff":
@@ -380,7 +373,7 @@ class DocumentAnalyzer:
 
     @staticmethod
     def _clear_unreadable_office_capabilities(item: FileItem) -> None:
-        """Clear metadata guesses when an Office package cannot be inspected."""
+        """Office 包不可读时清除推测的能力信息。"""
         item.page_count = 0
         item.slide_count = 0
         item.sheet_count = 0
@@ -393,7 +386,7 @@ class DocumentAnalyzer:
         item.has_small_image = False
 
     def _analyze_word_archive(self, archive: zipfile.ZipFile, names: list[str], item: FileItem) -> None:
-        """Extract lightweight Word structure, formula, macro, and object counts."""
+        """提取 Word 结构、公式、宏和对象的轻量统计。"""
         document_xml = self._read_archive_text(archive, "word/document.xml")
         footnotes_xml = self._read_archive_text(archive, "word/footnotes.xml")
         endnotes_xml = self._read_archive_text(archive, "word/endnotes.xml")
@@ -429,14 +422,14 @@ class DocumentAnalyzer:
         }
 
     def _mark_omml_dependency(self, item: FileItem, path: Path | None) -> None:
-        """Attach OMML dependency availability to a Word file analysis result."""
+        """为 Word 分析结果附加 OMML 依赖可用性。"""
         item.missing_omml_dependency = self._missing_omml_dependency(item, path)
         if item.has_omml:
             item.content_summary["missingOmmlDependency"] = item.missing_omml_dependency
 
     @staticmethod
     def _missing_omml_dependency(item: FileItem, path: Path | None) -> bool:
-        """Return whether an OMML Word file lacks a nearby conversion dependency."""
+        """判断含 OMML 的 Word 文件附近是否缺少转换依赖。"""
         if item.file_type != "Word" or not item.has_omml:
             return False
         if path and str(path) not in {"", "."}:
@@ -446,7 +439,7 @@ class DocumentAnalyzer:
         return True
 
     def _analyze_ppt_archive(self, archive: zipfile.ZipFile, names: list[str], item: FileItem) -> None:
-        """Extract lightweight PPT slide, media, formula, and macro counts."""
+        """提取 PPT 幻灯片、媒体、公式和宏的轻量统计。"""
         slide_names = [name for name in names if name.startswith("ppt/slides/slide") and name.endswith(".xml")]
         note_names = [name for name in names if name.startswith("ppt/notesSlides/notesSlide") and name.endswith(".xml")]
         image_count = sum(1 for name in names if name.startswith("ppt/media/"))
@@ -480,7 +473,7 @@ class DocumentAnalyzer:
 
     @staticmethod
     def _ppt_formula_count(text: str) -> int:
-        """Count PPT formula hints from OMML, MathType, Equation, and TeX markers."""
+        """根据 OMML、MathType、Equation 和 TeX 标记统计公式线索。"""
         return (
             len(re.findall(r"<(?:\w+:)?oMath(?:Para)?\b", text))
             + len(re.findall(r"MathType|Equation Native", text, flags=re.IGNORECASE))
@@ -488,7 +481,7 @@ class DocumentAnalyzer:
         )
 
     def _analyze_excel_archive(self, archive: zipfile.ZipFile, names: list[str], item: FileItem) -> None:
-        """Extract lightweight Excel sheet, formula, chart, image, and table counts."""
+        """提取 Excel 工作表、公式、图表、图片和表格统计。"""
         sheet_names = [name for name in names if name.startswith("xl/worksheets/sheet") and name.endswith(".xml")]
         image_count = sum(1 for name in names if name.startswith("xl/media/"))
         chart_count = sum(1 for name in names if name.startswith("xl/charts/chart") and name.endswith(".xml"))
@@ -520,7 +513,7 @@ class DocumentAnalyzer:
         }
 
     def _analyze_pdf(self, path: Path, item: FileItem) -> None:
-        """Classify a PDF for Mathpix-oriented OCR planning without uploading it."""
+        """分类 PDF 以规划 Mathpix OCR，不上传文件。"""
         data = path.read_bytes()[:5_000_000]
         text = data.decode("latin-1", errors="ignore")
         item.encrypted = "/Encrypt" in text
@@ -562,7 +555,7 @@ class DocumentAnalyzer:
 
     @staticmethod
     def _public_pdf_image_descriptor(descriptor: dict[str, Any]) -> dict[str, Any]:
-        """Return path-free PDF image metadata for API and report payloads."""
+        """返回接口和报告可用的不含路径的 PDF 图片信息。"""
         return {
             "index": descriptor.get("index", 0),
             "width": descriptor.get("width", 0),
@@ -575,7 +568,7 @@ class DocumentAnalyzer:
 
     @staticmethod
     def _pdf_text_snippets(text: str) -> list[str]:
-        """Extract bounded text snippets from simple PDF text-showing operators."""
+        """从简单 PDF 文本操作符提取有大小限制的文本片段。"""
         chunks: list[str] = []
         for pattern in [r"\(([^()]{3,160})\)\s*Tj", r"\(([^()]{3,160})\)\s*'"]:
             for value in re.findall(pattern, text):
@@ -586,7 +579,7 @@ class DocumentAnalyzer:
 
     @staticmethod
     def _pdf_type(has_text_layer: bool, image_objects: int, encrypted: bool) -> str:
-        """Classify a PDF as text, scanned, mixed, or encrypted."""
+        """将 PDF 分类为文本型、扫描型、混合型或加密型。"""
         if encrypted:
             return "加密 PDF"
         if has_text_layer and image_objects:
@@ -599,17 +592,17 @@ class DocumentAnalyzer:
 
     @staticmethod
     def _pdf_formula_hints(text: str) -> int:
-        """Count raw PDF tokens that suggest mathematical formula content."""
+        """统计提示数学公式内容的原始 PDF 标记。"""
         return sum(text.count(token) for token in ("Math", "Equation", "Formula", "∫", "√", "\\frac", "\\sum"))
 
     @staticmethod
     def _pdf_table_hints(text: str) -> int:
-        """Count raw PDF tokens that suggest table structure."""
+        """统计提示表格结构的原始 PDF 标记。"""
         return sum(text.count(token) for token in ("/Table", "Table", "Cell", "Row", "Column"))
 
     @staticmethod
     def _pdf_ocr_recommendation(pdf_type: str, formula_hints: int, table_hints: int) -> str:
-        """Recommend Mathpix OCR toggles from PDF type and detected hints."""
+        """根据 PDF 类型和线索推荐 Mathpix OCR 开关。"""
         recommendations: list[str] = []
         if pdf_type in {"扫描型 PDF", "混合型 PDF"}:
             recommendations.append("启用文字 OCR")
@@ -620,7 +613,7 @@ class DocumentAnalyzer:
         return "、".join(recommendations) if recommendations else "可解析文本层"
 
     def _analyze_zip(self, path: Path, item: FileItem) -> None:
-        """Summarize ZIP entries and supported files for batch import planning."""
+        """汇总 ZIP 条目和支持的文件，用于批量导入规划。"""
         try:
             with zipfile.ZipFile(path) as archive:
                 infos = [info for info in archive.infolist() if not info.is_dir()]
@@ -658,14 +651,14 @@ class DocumentAnalyzer:
             item.status = "校验失败"
 
     def _read_app_count(self, archive: zipfile.ZipFile, key: str) -> int:
-        """Read a numeric value from the OOXML app properties part."""
+        """读取 OOXML 应用属性部件中的数值。"""
         app_xml = self._read_archive_text(archive, "docProps/app.xml")
         match = re.search(fr"<{key}>(\d+)</{key}>", app_xml)
         return int(match.group(1)) if match else 0
 
     @staticmethod
     def _read_archive_text(archive: zipfile.ZipFile, name: str) -> str:
-        """Read a ZIP member as best-effort UTF-8 text."""
+        """尝试按 UTF-8 读取 ZIP 成员文本。"""
         try:
             return archive.read(name).decode("utf-8", errors="ignore")
         except KeyError:
@@ -673,13 +666,13 @@ class DocumentAnalyzer:
 
     @staticmethod
     def _looks_encrypted_ooxml(names: list[str]) -> bool:
-        """Return whether an OOXML package contains encryption sentinel parts."""
+        """判断 OOXML 包中是否包含加密标识部件。"""
         normalized = {name.replace("\\", "/").strip("/").lower() for name in names}
         return "encryptedpackage" in normalized or "encryptioninfo" in normalized
 
     @staticmethod
     def _looks_encrypted_office_container(path: Path) -> bool:
-        """Detect password-protected OOXML stored in an OLE compound container."""
+        """检测 OLE 复合容器中受密码保护的 OOXML。"""
         try:
             with path.open("rb") as handle:
                 prefix = handle.read(8192)
@@ -688,10 +681,9 @@ class DocumentAnalyzer:
         compound_magic = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
         if not prefix.startswith(compound_magic):
             return False
-        # Encrypted OOXML uses an OLE compound file containing EncryptionInfo
-        # and EncryptedPackage streams. Accept the compound signature for
-        # modern OOXML extensions even when the stream directory lies beyond
-        # the bounded prefix; legacy binary Office formats are routed elsewhere.
+        # 加密 OOXML 使用含 EncryptionInfo 和 EncryptedPackage 流的 OLE 复合文件。
+        # 即使流目录超出前缀读取范围，也接受现代 OOXML 扩展名的复合文件签名。
+        # 旧版二进制 Office 格式由其他分支处理。
         lowered = prefix.lower()
         return (
             "EncryptionInfo".encode("utf-16le").lower() in lowered
@@ -701,15 +693,15 @@ class DocumentAnalyzer:
 
 
 class TaskProcessor:
-    """Coordinate files, tasks, reports, preflight checks, and local handoff."""
+    """协调文件、任务、报告、预检与本地交接。"""
 
     def __init__(self, store: AppStore) -> None:
-        """Bind the runtime store and report builder used by task orchestration."""
+        """初始化当前对象所需的配置、依赖与运行状态。"""
         self.store = store
         self.report_builder = ReportBuilder(store)
 
     def create_file(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Create a metadata-only file record from API-provided file details."""
+        """根据接口提供的文件详情创建仅含元数据的记录。"""
         self._assert_permission("files.manage")
         settings = self.store.get_settings()
         file_name = self._resolve_duplicate_file_name(str(payload.get("file_name", "")), str(settings.get("duplicateFileStrategy", "自动重命名")))
@@ -730,7 +722,7 @@ class TaskProcessor:
         return self.store.save_file(record)
 
     def create_uploaded_file(self, file_name: str, content: bytes) -> list[dict[str, Any]]:
-        """Persist uploaded bytes, analyze them, and register ZIP children."""
+        """保存上传字节、分析内容并注册 ZIP 子条目。"""
         self._assert_permission("files.manage")
         relative_path = self._safe_relative_path(file_name)
         safe_name = self._safe_file_name(file_name)
@@ -760,7 +752,7 @@ class TaskProcessor:
         return saved
 
     def replace_uploaded_file(self, file_id: str, file_name: str, content: bytes) -> dict[str, Any]:
-        """Replace an existing uploaded file while preserving its public id."""
+        """替换已有上传文件，同时保留其公开标识。"""
         self._assert_permission("files.manage")
         if not self.store.get_file(file_id):
             raise KeyError(f"File not found: {file_id}")
@@ -795,7 +787,7 @@ class TaskProcessor:
         return replaced
 
     def reports_for_file(self, file_id: str) -> list[dict[str, Any]]:
-        """Return reports that reference a specific source file."""
+        """返回引用指定源文件的报告。"""
         if not self.store.get_file(file_id):
             raise KeyError(f"File not found: {file_id}")
         reports: list[dict[str, Any]] = []
@@ -806,7 +798,7 @@ class TaskProcessor:
         return reports
 
     def create_task(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Create a task and immediately run the local PRD simulation pipeline."""
+        """创建任务并立即运行本地处理流程。"""
         file_ids = list(payload.get("file_ids") or [])
         task_type = str(payload.get("task_type") or "batch_process")
         self._assert_task_permission(task_type)
@@ -817,7 +809,7 @@ class TaskProcessor:
         return self.run_task(saved["id"])
 
     def run_task(self, task_id: str) -> dict[str, Any]:
-        """Run one queued task through analysis, report generation, and cleanup."""
+        """对队列任务执行分析、报告生成和清理。"""
         task = self.store.get_task(task_id)
         if not task:
             raise KeyError(f"Task not found: {task_id}")
@@ -921,7 +913,7 @@ class TaskProcessor:
         return saved_task
 
     def _verify_task_source_files(self, task: dict[str, Any], files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Create verified task snapshots before any analysis or conversion."""
+        """在任何分析或转换前创建通过完整性校验的任务快照。"""
         verified: list[dict[str, Any]] = []
         snapshots: list[dict[str, Any]] = []
         snapshot_dir = self.store.output_task_dir(str(task.get("id") or "")) / ".inputs"
@@ -967,7 +959,7 @@ class TaskProcessor:
 
     @classmethod
     def _normalize_workflow_options(cls, task_type: str, options: dict[str, Any]) -> dict[str, Any]:
-        """Persist a trustworthy workflow order from the draggable planner UI."""
+        """保存来自拖拽规划界面的可信工作流顺序。"""
         plan = cls._workflow_plan_from_options(task_type, options)
         normalized = dict(options)
         normalized["workflowOrder"] = plan["order"]
@@ -977,7 +969,7 @@ class TaskProcessor:
 
     @staticmethod
     def _workflow_plan_from_options(task_type: str, options: dict[str, Any]) -> dict[str, Any]:
-        """Normalize and validate the draggable workflow order from task options."""
+        """规范并校验任务选项中的拖拽工作流顺序。"""
         raw_order = options.get("workflowOrder")
         order_values = raw_order if isinstance(raw_order, list) else []
         order: list[str] = []
@@ -1010,7 +1002,7 @@ class TaskProcessor:
 
     @staticmethod
     def _apply_task_report_summary(task: dict[str, Any], report: dict[str, Any]) -> None:
-        """Copy report outcome counts back onto the persisted task record."""
+        """将报告结果计数回写到任务记录。"""
         task["success_count"] = int(report.get("success_count") or report.get("batch_success_count") or 0)
         task["fail_count"] = int(report.get("fail_count") or report.get("batch_fail_count") or 0)
         task["pending_count"] = int(report.get("pending_count") or 0)
@@ -1020,7 +1012,7 @@ class TaskProcessor:
 
     @staticmethod
     def _task_failure_summary(report: dict[str, Any]) -> str:
-        """Build a concise task error message from report failure rows."""
+        """根据报告失败行生成简短任务错误信息。"""
         rows = list(report.get("failureRows") or [])
         if not rows:
             return ""
@@ -1042,7 +1034,7 @@ class TaskProcessor:
         return "；".join(snippets) + suffix
 
     def retry_task(self, task_id: str) -> dict[str, Any]:
-        """Reset a failed, canceled, or interrupted task and run it again."""
+        """重置失败、取消或中断的任务并重新运行。"""
         self._assert_permission("tasks.control")
         task = self.store.get_task(task_id)
         if not task:
@@ -1057,7 +1049,7 @@ class TaskProcessor:
         return self.run_task(task_id)
 
     def acknowledge_task_completion_notice(self, task_id: str) -> dict[str, Any]:
-        """Mark a task completion notice as shown to the user."""
+        """标记任务完成通知已经向用户显示。"""
         task = self.store.get_task(task_id)
         if not task:
             raise KeyError(f"Task not found: {task_id}")
@@ -1071,7 +1063,7 @@ class TaskProcessor:
         return self.store.save_task(task)
 
     def skip_batch_file(self, task_id: str, file_id: str) -> dict[str, Any]:
-        """Skip one failed file in a batch task and rebuild the batch report."""
+        """跳过批量任务中的失败文件并重建报告。"""
         self._assert_permission("tasks.control")
         task = self.store.get_task(task_id)
         if not task:
@@ -1103,7 +1095,7 @@ class TaskProcessor:
         return self.run_task(task_id)
 
     def sync_local_task_status(self, task_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        """Accept a token-gated local-client status update for one task."""
+        """接受令牌保护的本地客户端任务状态更新。"""
         task = self.store.get_task(task_id)
         if not task:
             raise KeyError(f"Task not found: {task_id}")
@@ -1178,7 +1170,7 @@ class TaskProcessor:
 
     @staticmethod
     def _validate_local_sync_transition(current_status: str, next_status: str) -> None:
-        """Reject local-client state regressions and control-endpoint bypasses."""
+        """拒绝状态倒退及绕过控制接口的同步更新。"""
         terminal_statuses = {"成功", "失败", "已取消"}
         if current_status in terminal_statuses and next_status != current_status:
             raise ValueError(f"终态任务不能从{current_status}同步改写为{next_status}")
@@ -1196,7 +1188,7 @@ class TaskProcessor:
 
     @staticmethod
     def _validate_local_sync_execution_task(task: dict[str, Any], execution: dict[str, Any]) -> None:
-        """Reject local dry-run sync summaries that target a different task."""
+        """拒绝针对其他任务的模拟执行同步摘要。"""
         execution_task = execution.get("task") if isinstance(execution.get("task"), dict) else {}
         execution_task_id = str(execution_task.get("id") or "").strip()
         execution_task_type = str(execution_task.get("task_type") or "").strip()
@@ -1207,7 +1199,7 @@ class TaskProcessor:
 
     @staticmethod
     def _local_sync_status(status: str) -> str:
-        """Map local-client status aliases to K12 task status labels."""
+        """将客户端状态别名映射为 K12 任务状态。"""
         normalized = status.strip()
         aliases = {
             "queued": "待处理",
@@ -1237,7 +1229,7 @@ class TaskProcessor:
 
     @classmethod
     def _local_sync_outputs(cls, outputs: Any) -> list[dict[str, Any]]:
-        """Sanitize local-client output summaries before persisting them."""
+        """保存前清理客户端输出摘要。"""
         if not isinstance(outputs, list):
             return []
         cleaned: list[dict[str, Any]] = []
@@ -1275,7 +1267,7 @@ class TaskProcessor:
         native_execution_report: dict[str, Any],
         message: str,
     ) -> dict[str, Any]:
-        """Resolve pending local artifacts from verified success, failure, or cancellation."""
+        """根据校验过的成功、失败或取消证据处理待完成本地产物。"""
         reports = [report for report in self.store.list_reports() if report.get("task_id") == task.get("id")]
         report = reports[0] if reports else {}
         artifacts = list((report.get("analysis") or {}).get("artifacts") or [])
@@ -1386,7 +1378,7 @@ class TaskProcessor:
         return self._refresh_reconciled_report(report)
 
     def _refresh_reconciled_report(self, report: dict[str, Any]) -> dict[str, Any]:
-        """Refresh report counts and presentation after pending artifacts reach a terminal state."""
+        """待完成产物进入终态后刷新报告计数与展示。"""
         artifacts = list((report.get("analysis") or {}).get("artifacts") or [])
         pending = [item for item in artifacts if item.get("status") == "待本地客户端执行"]
         cancelled = [item for item in artifacts if item.get("status") == "local_execution_cancelled"]
@@ -1453,7 +1445,7 @@ class TaskProcessor:
 
     @staticmethod
     def _local_sync_dry_run_execution(value: Any) -> dict[str, Any]:
-        """Redact and constrain a local-client dry-run execution summary."""
+        """脱敏并约束本地客户端模拟执行摘要。"""
         if not isinstance(value, dict):
             return {}
         raw_actions = value.get("actions") if isinstance(value.get("actions"), list) else []
@@ -1509,7 +1501,7 @@ class TaskProcessor:
 
     @staticmethod
     def _local_sync_native_execution_report(value: Any) -> dict[str, Any]:
-        """Sanitize a real native execution report from the local desktop client."""
+        """清理本地桌面客户端的真实原生执行报告。"""
         if not isinstance(value, dict):
             return {}
         raw_actions = value.get("actions") if isinstance(value.get("actions"), list) else []
@@ -1569,7 +1561,7 @@ class TaskProcessor:
 
     @staticmethod
     def _native_execution_status(status: str) -> str:
-        """Normalize local-client native execution result statuses."""
+        """规范本地客户端原生执行结果状态。"""
         normalized = str(status or "").strip()
         aliases = {
             "completed": "success",
@@ -1591,7 +1583,7 @@ class TaskProcessor:
         return aliases.get(normalized.lower(), aliases.get(normalized, normalized[:80] or "unknown"))
 
     def recover_interrupted_tasks(self) -> dict[str, Any]:
-        """Mark in-flight tasks as recoverable after a service restart."""
+        """服务重启后将运行中任务标记为可恢复。"""
         recovered: list[dict[str, Any]] = []
         for task in self.store.list_tasks():
             if task.get("status") != "处理中":
@@ -1608,7 +1600,7 @@ class TaskProcessor:
         return {"recovered_count": len(recovered), "tasks": recovered}
 
     def task_recovery_summary(self) -> dict[str, Any]:
-        """Summarize paused, failed, canceled, and restart-recoverable tasks."""
+        """汇总暂停、失败、取消和重启后可恢复的任务。"""
         tasks = list(self.store.list_tasks())
         items: list[dict[str, Any]] = []
         for task in tasks:
@@ -1659,7 +1651,7 @@ class TaskProcessor:
 
     @staticmethod
     def _task_recovery_status(task: dict[str, Any], recoverable: bool, retryable: bool) -> str:
-        """Return the UI recovery state for an interrupted or retryable task."""
+        """返回中断或可重试任务的界面恢复状态。"""
         status = str(task.get("status") or "")
         if status == "处理中":
             return "running_watch"
@@ -1673,9 +1665,9 @@ class TaskProcessor:
 
     @staticmethod
     def _redact_local_path_text(text: str) -> str:
-        """Hide local filesystem paths in task recovery messages."""
+        """隐藏消息中的常见本地文件路径。"""
         def replacement(match: re.Match[str]) -> str:
-            """Replace one matched local path with a path-free display label."""
+            """将匹配的本地路径替换为不含路径的显示标签。"""
             raw = match.group(0)
             name = raw.replace("\\", "/").rstrip("/").split("/")[-1]
             return f"本地路径已隐藏/{name}" if name else "本地路径已隐藏"
@@ -1683,7 +1675,7 @@ class TaskProcessor:
         return LOCAL_PATH_TEXT.sub(replacement, text)
 
     def cancel_task(self, task_id: str) -> dict[str, Any]:
-        """Cancel a task that has not reached a terminal state."""
+        """取消尚未进入终态的任务。"""
         self._assert_permission("tasks.control")
         task = self.store.get_task(task_id)
         if not task:
@@ -1706,14 +1698,14 @@ class TaskProcessor:
         return self.store.save_task(task)
 
     def file_preview(self, file_id: str) -> dict[str, Any]:
-        """Build a structured preview payload for one uploaded or source file."""
+        """生成上传文件或源文件的结构化预览载荷。"""
         file = self.store.get_file(file_id)
         if not file:
             raise KeyError(f"File not found: {file_id}")
         return build_file_preview(file)
 
     def report_comparison(self, report_id: str) -> dict[str, Any]:
-        """Compare source previews with successful conversion output previews."""
+        """比较源预览与成功转换产物的预览。"""
         report = self.store.get_report(report_id)
         if not report:
             raise KeyError(f"Report not found: {report_id}")
@@ -1755,7 +1747,7 @@ class TaskProcessor:
         }
 
     def file_download_info(self, file_id: str) -> dict[str, Any]:
-        """Return a safe download descriptor for a registered source file."""
+        """返回注册源文件的安全下载描述。"""
         file = self.store.get_file(file_id)
         if not file:
             raise KeyError(f"File not found: {file_id}")
@@ -1785,7 +1777,7 @@ class TaskProcessor:
         }
 
     def _artifact_file_item(self, path: Path, artifact: dict[str, Any]) -> dict[str, Any]:
-        """Analyze a conversion artifact as a temporary previewable file item."""
+        """将转换产物分析为可临时预览的文件记录。"""
         analyzer = DocumentAnalyzer(self.store.get_settings().get("singleFileLimitMb", 500))
         item = analyzer.analyze_file(path, str(artifact.get("file_name") or path.name))
         payload = item.to_dict()
@@ -1803,7 +1795,7 @@ class TaskProcessor:
 
     @staticmethod
     def _preview_diff(source_preview: dict[str, Any], output_preview: dict[str, Any]) -> dict[str, Any]:
-        """Compare source and conversion previews for report quality checks."""
+        """比较源与转换预览，用于报告质量检查。"""
         source_pages = len(source_preview.get("pages") or [])
         output_pages = len(output_preview.get("pages") or [])
         source_objects = {item.get("label") or item.get("type"): int(item.get("count") or 0) for item in source_preview.get("objects", [])}
@@ -1829,22 +1821,22 @@ class TaskProcessor:
         }
 
     def set_file_password(self, file_id: str, password: str) -> dict[str, Any]:
-        """Store an in-memory password for an encrypted file session."""
+        """仅在内存中保存加密文件会话密码。"""
         self._assert_permission("files.manage")
         return self.store.set_file_password(file_id, password)
 
     def delete_file(self, file_id: str) -> bool:
-        """Delete a file record and its controlled upload cache."""
+        """删除文件记录及受控上传缓存。"""
         self._assert_permission("files.manage")
         return self.store.delete_file(file_id)
 
     def delete_report(self, report_id: str) -> dict[str, Any]:
-        """Delete one report and its derived review records."""
+        """删除报告及其衍生审阅记录。"""
         self._assert_permission("reports.manage")
         return self.store.delete_report(report_id)
 
     def pause_task(self, task_id: str) -> dict[str, Any]:
-        """Pause a task so it can later resume from the task queue."""
+        """暂停任务，使其可稍后从队列恢复。"""
         self._assert_permission("tasks.control")
         task = self.store.get_task(task_id)
         if not task:
@@ -1858,7 +1850,7 @@ class TaskProcessor:
         return self.store.save_task(task)
 
     def resume_task(self, task_id: str) -> dict[str, Any]:
-        """Resume a paused or restart-interrupted task."""
+        """恢复暂停或重启中断的任务。"""
         self._assert_permission("tasks.control")
         task = self.store.get_task(task_id)
         if not task:
@@ -1876,7 +1868,7 @@ class TaskProcessor:
         return self.run_task(task_id)
 
     def restore_task_backups(self, task_id: str) -> dict[str, Any]:
-        """Restore macro pre-execution backups for the latest task report."""
+        """恢复最新报告中宏执行前的备份。"""
         self._assert_permission("tasks.control")
         task = self.store.get_task(task_id)
         if not task:
@@ -1939,7 +1931,7 @@ class TaskProcessor:
         }
 
     def cleanup_runtime_history(self, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Remove expired tasks, reports, logs, and runtime cache directories."""
+        """清理过期任务、报告、日志和受管运行缓存。"""
         payload = payload or {}
         settings = self.store.get_settings()
         retention_days = self._non_negative_int(
@@ -1959,7 +1951,7 @@ class TaskProcessor:
         return result
 
     def auto_cleanup_runtime_history(self) -> dict[str, Any]:
-        """Run retention cleanup only when the configured interval has elapsed."""
+        """仅在配置的间隔到期后执行保留期清理。"""
         settings = self.store.get_settings()
         if not settings.get("autoCleanTemp"):
             return {"skipped": True, "reason": "自动清理未开启"}
@@ -1987,7 +1979,7 @@ class TaskProcessor:
         return result
 
     def current_user(self) -> dict[str, Any]:
-        """Return the active local user with inherited effective permissions."""
+        """返回当前用户及继承的有效权限。"""
         settings = self.store.get_settings()
         users = self.store.list_users()
         active_id = str(settings.get("activeUserId") or "user_admin")
@@ -2006,7 +1998,7 @@ class TaskProcessor:
         return user
 
     def list_users(self) -> list[dict[str, Any]]:
-        """Return local users annotated with role permissions and active state."""
+        """返回本地用户及角色权限、激活状态。"""
         current_id = self.current_user().get("id")
         users = self.store.list_users()
         for user in users:
@@ -2016,7 +2008,7 @@ class TaskProcessor:
         return users
 
     def save_user(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Create or update a local user and optionally activate it."""
+        """创建或更新本地用户，并按需激活。"""
         self._assert_permission("users.manage")
         if not str(payload.get("name") or "").strip():
             raise ValueError("用户名称不能为空")
@@ -2027,7 +2019,7 @@ class TaskProcessor:
         return user
 
     def delete_user(self, user_id: str) -> bool:
-        """Delete a local user while preserving at least one active admin."""
+        """删除本地用户，同时保留至少一名可用管理员。"""
         self._assert_permission("users.manage")
         users = self.store.list_users()
         target = next((item for item in users if item.get("id") == user_id), None)
@@ -2045,7 +2037,7 @@ class TaskProcessor:
         return deleted
 
     def activate_user(self, user_id: str) -> dict[str, Any]:
-        """Switch the active local session to an enabled login-capable user."""
+        """将本地会话切换到允许登录的启用用户。"""
         user = self.store.get_user(user_id)
         if not user:
             raise ValueError("用户不存在")
@@ -2059,11 +2051,11 @@ class TaskProcessor:
         return self.current_user()
 
     def list_templates(self) -> list[dict[str, Any]]:
-        """Return conversion, OCR, and formula template records."""
+        """返回转换、OCR 和公式模板记录。"""
         return self.store.list_templates()
 
     def save_template(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist a reusable template and sync relevant default settings."""
+        """保存可复用模板并同步相关默认设置。"""
         self._assert_permission("templates.manage")
         if not str(payload.get("name") or "").strip():
             raise ValueError("模板名称不能为空")
@@ -2083,12 +2075,12 @@ class TaskProcessor:
         return template
 
     def delete_template(self, template_id: str) -> bool:
-        """Delete one reusable template record."""
+        """删除可复用模板记录。"""
         self._assert_permission("templates.manage")
         return self.store.delete_template(template_id)
 
     def list_authorizations(self) -> list[dict[str, Any]]:
-        """Return authorization toggles synchronized with current settings."""
+        """返回与当前设置同步的授权开关。"""
         settings = self.store.get_settings()
         authorizations = self.store.list_authorizations()
         for item in authorizations:
@@ -2099,7 +2091,7 @@ class TaskProcessor:
         return authorizations
 
     def save_authorization(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Update one PRD-sensitive authorization and its backing setting."""
+        """更新敏感功能的明确授权及对应设置。"""
         self._assert_permission("authorizations.manage")
         key = str(payload.get("key") or "")
         if key not in DEFAULT_AUTHORIZATIONS:
@@ -2111,19 +2103,19 @@ class TaskProcessor:
         return self.list_authorizations_by_key(key)
 
     def list_authorizations_by_key(self, key: str) -> dict[str, Any]:
-        """Return one authorization record by its stable key."""
+        """根据稳定键返回授权记录。"""
         for item in self.list_authorizations():
             if item.get("key") == key:
                 return item
         raise ValueError("授权项不存在")
 
     def update_settings(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Persist settings after enforcing the current user's permission."""
+        """验证当前用户权限后保存设置。"""
         self._assert_permission("settings.manage")
         return self.store.update_settings(payload)
 
     def preflight_checks(self, payload: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        """Return PRD preflight checks for permissions, local components, and Mathpix."""
+        """返回权限、本地组件及 Mathpix 的需求预检结果。"""
         payload = payload or {}
         settings = self.store.get_settings()
         task_type = str(payload.get("task_type") or "")
@@ -2143,20 +2135,20 @@ class TaskProcessor:
         return checks
 
     def _assert_task_permission(self, task_type: str) -> None:
-        """Require task creation permissions and macro execution permission when needed."""
+        """检查创建任务及必要的宏执行权限。"""
         self._assert_permission("tasks.create")
         if task_type == "macro_sequence":
             self._assert_permission("macros.execute")
 
     def _assert_permission(self, permission: str) -> None:
-        """Raise when the active local user lacks a required permission."""
+        """当前用户缺少指定权限时抛出错误。"""
         user = self.current_user()
         permissions = set(user.get("effective_permissions") or [])
         if permission not in permissions:
             raise ValueError(f"当前用户缺少权限：{permission}")
 
     def _preflight_output_dir(self) -> dict[str, Any]:
-        """Verify that the configured output directory can be written."""
+        """验证配置的输出目录可写。"""
         try:
             output_dir = self.store.output_base_dir()
             probe = output_dir / ".k12-write-test"
@@ -2182,7 +2174,7 @@ class TaskProcessor:
             )
 
     def _preflight_disk_space(self, path_value: str, settings: dict[str, Any]) -> dict[str, Any]:
-        """Check whether available disk space meets the configured threshold."""
+        """检查可用磁盘空间是否达到配置阈值。"""
         min_free_mb = self._positive_int(settings.get("minFreeDiskMb", 512), 512)
         path = Path(path_value or self.store.data_dir)
         try:
@@ -2201,7 +2193,7 @@ class TaskProcessor:
             return self._preflight_item("disk_space", "磁盘空间", "需确认", "无法读取", str(exc), "检查输出目录是否可访问")
 
     def _preflight_user_permission(self, task_type: str) -> dict[str, Any]:
-        """Report whether the active user can create the requested task."""
+        """检查当前用户能否创建所请求的任务。"""
         user = self.current_user()
         permissions = set(user.get("effective_permissions") or [])
         missing: list[str] = []
@@ -2219,7 +2211,7 @@ class TaskProcessor:
         )
 
     def _preflight_local_mode(self, task_type: str, execute_mode: str, settings: dict[str, Any]) -> dict[str, Any]:
-        """Check that local-client routing is enabled for local-required tasks."""
+        """检查需本地处理的任务是否启用客户端路由。"""
         needs_local = task_type in LOCAL_REQUIRED_TASKS or execute_mode in {"local", "hybrid"}
         enabled = bool(settings.get("localClientEnabled", True))
         status = "需确认" if needs_local and not enabled else "通过"
@@ -2234,7 +2226,7 @@ class TaskProcessor:
         )
 
     def _preflight_local_client_platform(self, task_type: str, execute_mode: str, settings: dict[str, Any]) -> dict[str, Any]:
-        """Validate Windows/macOS client heartbeats before MathType handoff."""
+        """交接 MathType 前验证 Windows/macOS 客户端心跳。"""
         needs_local = task_type in LOCAL_REQUIRED_TASKS or execute_mode in {"local", "hybrid"}
         expected_platform = self._configured_local_client_platform(settings)
         heartbeat = settings.get("localClientHeartbeat") if isinstance(settings.get("localClientHeartbeat"), dict) else {}
@@ -2321,7 +2313,7 @@ class TaskProcessor:
         )
 
     def _preflight_local_client_components(self, task_type: str, execute_mode: str, file_ids: list[str], settings: dict[str, Any]) -> dict[str, Any]:
-        """Check heartbeat component capabilities required by the task."""
+        """检查任务需要的心跳组件能力。"""
         required_keys = self._required_preflight_capabilities(task_type, execute_mode, file_ids, settings)
         if not required_keys:
             return self._preflight_item(
@@ -2386,7 +2378,7 @@ class TaskProcessor:
         )
 
     def _required_preflight_capabilities(self, task_type: str, execute_mode: str, file_ids: list[str], settings: dict[str, Any]) -> list[str]:
-        """Return local-client capability keys implied by task type and files."""
+        """根据任务类型和文件返回所需客户端能力键。"""
         needs_local = task_type in LOCAL_REQUIRED_TASKS or execute_mode in {"local", "hybrid"}
         if not needs_local:
             return []
@@ -2409,7 +2401,7 @@ class TaskProcessor:
         return list(dict.fromkeys(required))
 
     def _preflight_mathpix(self, task_type: str, settings: dict[str, Any]) -> dict[str, Any]:
-        """Check Mathpix upload authorization, OCR toggles, and credentials."""
+        """检查 Mathpix 上传授权、OCR 开关和凭据。"""
         if task_type != "pdf_to_word" or settings.get("pdfToWordEngine") != "Mathpix":
             return self._preflight_item("mathpix_authorization", "Mathpix 授权", "通过", "不涉及", "当前任务不需要 Mathpix 外部上传", "无需处理")
         enabled_ocr = any([settings.get("enableTextOcr", True), settings.get("enableFormulaOcr", True), settings.get("enableTableOcr", True)])
@@ -2438,13 +2430,13 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_env_names(settings: dict[str, Any]) -> tuple[str, str]:
-        """Return the configured Mathpix credential environment variable names."""
+        """返回配置的 Mathpix 凭据环境变量名称。"""
         app_id_env = str(settings.get("mathpixAppIdEnv") or "MATHPIX_APP_ID").strip() or "MATHPIX_APP_ID"
         app_key_env = str(settings.get("mathpixAppKeyEnv") or "MATHPIX_APP_KEY").strip() or "MATHPIX_APP_KEY"
         return app_id_env, app_key_env
 
     def _preflight_mathtype_compatibility(self, task_type: str, file_ids: list[str], settings: dict[str, Any]) -> dict[str, Any]:
-        """Warn when MathType objects need same-platform delivery or fallbacks."""
+        """提示 MathType 的同平台交付或兜底要求。"""
         math_tasks = {"formula_precheck", "omml_to_mathtype", "mathtype_format"}
         files = [self.store.get_file(file_id) for file_id in file_ids]
         has_formula_objects = any(file and (file.get("has_omml") or file.get("has_mathtype")) for file in files)
@@ -2497,7 +2489,7 @@ class TaskProcessor:
         )
 
     def _preflight_macro(self, task_type: str, settings: dict[str, Any]) -> dict[str, Any]:
-        """Check Word macro execution authorization and safety settings."""
+        """检查 Word 宏执行授权与安全设置。"""
         if task_type != "macro_sequence":
             return self._preflight_item("macro_authorization", "宏授权", "通过", "不涉及", "当前任务不执行 Word 宏", "无需处理")
         enabled = bool(settings.get("enableMacroExecution", True))
@@ -2521,7 +2513,7 @@ class TaskProcessor:
         recommendation: str,
         **extra: Any,
     ) -> dict[str, Any]:
-        """Build one normalized preflight row for API and UI consumers."""
+        """生成接口和界面使用的规范预检行。"""
         severity = {"通过": "info", "需确认": "warning", "失败": "error"}.get(status, "info")
         return {
             "id": check_id,
@@ -2535,7 +2527,7 @@ class TaskProcessor:
         }
 
     def resolve_execute_mode(self, task_type: str, file_ids: list[str]) -> str:
-        """Choose web, local, or hybrid execution from task type and file capabilities."""
+        """根据任务和文件能力选择网页、本地或混合执行。"""
         if task_type in LOCAL_REQUIRED_TASKS:
             return "local"
         files = [self.store.get_file(file_id) for file_id in file_ids]
@@ -2555,7 +2547,7 @@ class TaskProcessor:
         return "web"
 
     def capabilities(self) -> dict[str, Any]:
-        """Expose current local API, Office, MathType, macro, and sync capability bits."""
+        """公开本地接口、Office、MathType、宏和同步能力标记。"""
         settings = self.store.get_settings()
         profile = self.install_profile()
         system_name = profile["platform"]
@@ -2596,7 +2588,7 @@ class TaskProcessor:
         }
 
     def architecture_blueprint(self) -> dict[str, Any]:
-        """Return the PRD architecture blueprint without claiming unreal native execution."""
+        """返回需求架构蓝图，不声称实现未验证的原生执行。"""
         settings = self.store.get_settings()
         profile = self.install_profile()
         caps = self.capabilities()
@@ -2700,7 +2692,7 @@ class TaskProcessor:
         }
 
     def api_catalog(self) -> dict[str, Any]:
-        """Return API route metadata with auth, permission, and sensitivity boundaries."""
+        """返回接口路由元数据及授权、权限和敏感性边界。"""
         token_required = bool(str(self.store.get_settings().get("localSecurityToken") or "").strip())
         endpoints = [
             self._api_endpoint("GET", "/api/health", "健康检查", "public", "返回服务状态和版本"),
@@ -2820,7 +2812,7 @@ class TaskProcessor:
         }
 
     def data_dictionary(self) -> dict[str, Any]:
-        """Return PRD data objects, field definitions, and path privacy notes."""
+        """返回需求数据对象、字段定义及路径隐私说明。"""
         reports = self.store.list_reports()
         macros = self.store.list_macro_templates()
         objects = [
@@ -3043,7 +3035,7 @@ class TaskProcessor:
         fields: list[tuple[str, str, str]],
         sensitive_fields: list[str],
     ) -> dict[str, Any]:
-        """Build one PRD data dictionary object entry with sensitivity metadata."""
+        """生成含敏感性说明的数据字典对象。"""
         return {
             "key": key,
             "name": name,
@@ -3065,7 +3057,7 @@ class TaskProcessor:
         permission: str = "",
         response_headers: list[dict[str, str]] | None = None,
     ) -> dict[str, Any]:
-        """Build one API catalog endpoint entry with auth and sensitive-route flags."""
+        """生成含授权和敏感路由标记的接口目录条目。"""
         endpoint = {
             "method": method,
             "path": path,
@@ -3080,7 +3072,7 @@ class TaskProcessor:
         return endpoint
 
     def acceptance_matrix(self) -> dict[str, Any]:
-        """Return PRD acceptance evidence without overstating external execution."""
+        """返回需求验收证据，不夸大外部执行覆盖情况。"""
         settings = self.store.get_settings()
         files = self.store.list_files()
         tasks = self.store.list_tasks()
@@ -3578,7 +3570,7 @@ class TaskProcessor:
         }
 
     def _acceptance_group(self, section: str, title: str, items: list[dict[str, Any]]) -> dict[str, Any]:
-        """Build one PRD acceptance group with summary counts and evidence items."""
+        """生成需求验收分组及摘要计数和证据条目。"""
         total = len(items)
         covered = sum(1 for item in items if item["level"] == "good")
         contract = sum(1 for item in items if item["level"] == "warn")
@@ -3608,7 +3600,7 @@ class TaskProcessor:
         gap: str = "",
         next_step: str = "",
     ) -> dict[str, Any]:
-        """Build one PRD acceptance item with verification context and uncovered risk."""
+        """生成含验证背景与未覆盖风险的验收条目。"""
         default_next_step = {
             "good": "保持回归测试和报告证据",
             "warn": "在真实本地客户端、Office、MathType 或 Mathpix 授权环境中实测",
@@ -3631,7 +3623,7 @@ class TaskProcessor:
 
     @staticmethod
     def _acceptance_verification_context(level: str, status: str, gap: str = "") -> dict[str, Any]:
-        """Classify verification scope with checklists without overstating local or external coverage."""
+        """按检查清单区分验证范围，不夸大本地或外部覆盖。"""
         if status == "需 Mathpix 实测":
             return {
                 "scope": "external_mathpix",
@@ -3688,16 +3680,16 @@ class TaskProcessor:
 
     @staticmethod
     def _acceptance_current(file_type: str, file_types: set[str]) -> str:
-        """Describe whether the current file sample set covers one required type."""
+        """说明当前文件样本是否覆盖所需类型。"""
         return f"当前样本{'已包含' if file_type in file_types else '未包含'} {file_type}"
 
     @staticmethod
     def _task_presence_current(task_type: str, present: bool) -> str:
-        """Describe whether runtime data proves one PRD task type was exercised."""
+        """说明运行数据是否证明某类任务已执行。"""
         return f"{task_type} {'已有任务或报告' if present else '等待样本任务'}"
 
     def _conversion_capability_probes(self) -> dict[str, dict[str, Any]]:
-        """Run safe standard-library conversion probes for acceptance evidence."""
+        """运行安全的标准库转换探测以提供验收证据。"""
         cached = getattr(self, "_conversion_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -3710,7 +3702,7 @@ class TaskProcessor:
         return probes
 
     def _probe_word_to_ppt_conversion(self) -> dict[str, Any]:
-        """Probe the baseline Word-to-PPT converter with a temporary DOCX fixture."""
+        """使用临时 DOCX 样本验证基础 Word 转 PPT。"""
         try:
             with tempfile.TemporaryDirectory(prefix="k12-conversion-probe-") as tmp:
                 root = Path(tmp)
@@ -3741,7 +3733,7 @@ class TaskProcessor:
             return self._conversion_probe_failure("pptx", exc)
 
     def _probe_ppt_to_word_conversion(self) -> dict[str, Any]:
-        """Probe the baseline PPT-to-Word converter with a temporary PPTX fixture."""
+        """使用临时 PPTX 样本验证基础 PPT 转 Word。"""
         try:
             with tempfile.TemporaryDirectory(prefix="k12-conversion-probe-") as tmp:
                 root = Path(tmp)
@@ -3766,7 +3758,7 @@ class TaskProcessor:
             return self._conversion_probe_failure("docx", exc)
 
     def _probe_pdf_to_word_conversion(self) -> dict[str, Any]:
-        """Probe the local text-layer PDF-to-Word converter with a temporary PDF."""
+        """使用临时 PDF 验证本地文本层转 Word。"""
         try:
             with tempfile.TemporaryDirectory(prefix="k12-conversion-probe-") as tmp:
                 root = Path(tmp)
@@ -3789,7 +3781,7 @@ class TaskProcessor:
             return self._conversion_probe_failure("docx", exc)
 
     def _conversion_probe_failure(self, artifact_type: str, exc: Exception) -> dict[str, Any]:
-        """Return a path-free failure result for a conversion probe."""
+        """返回不含路径的转换探测失败结果。"""
         message = self._redact_local_path_text(str(exc) or exc.__class__.__name__)
         return {
             "schema_version": "k12.conversionCapabilityProbe.v1",
@@ -3801,12 +3793,12 @@ class TaskProcessor:
 
     @staticmethod
     def _conversion_probe_current(task_type: str, has_task_history: bool, probe: dict[str, Any]) -> str:
-        """Summarize conversion probe output without exposing temporary paths."""
+        """汇总转换探测产物，不暴露临时路径。"""
         history = "已有任务或报告" if has_task_history else "无历史任务"
         return f"{task_type} {history}；{probe.get('current') or '自检未运行'}"
 
     def _word_object_preservation_probe(self) -> dict[str, Any]:
-        """Self-check DOCX object preservation evidence for Word-to-PPT acceptance."""
+        """自检 Word 转 PPT 的 DOCX 对象保留证据。"""
         cached = getattr(self, "_word_object_preservation_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -3891,7 +3883,7 @@ class TaskProcessor:
         return probe
 
     def _macro_batch_sequence_probe(self) -> dict[str, Any]:
-        """Self-check batch macro sequencing contracts without running Word macros."""
+        """自检批量宏顺序约定，不运行 Word 宏。"""
         cached = getattr(self, "_macro_batch_sequence_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -3978,7 +3970,7 @@ class TaskProcessor:
         return probe
 
     def _macro_ordered_execution_probe(self) -> dict[str, Any]:
-        """Self-check ordered macro local handoff and dry-run sync contracts."""
+        """自检有序宏的本地交接和模拟执行同步约定。"""
         cached = getattr(self, "_macro_ordered_execution_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -4117,7 +4109,7 @@ class TaskProcessor:
         return probe
 
     def _latex_mathtype_probe(self) -> dict[str, Any]:
-        """Self-check LaTeX-to-MathType preview and fallback formula metadata."""
+        """自检 LaTeX 转 MathType 预览和公式兜底元数据。"""
         cached = getattr(self, "_latex_mathtype_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -4177,7 +4169,7 @@ class TaskProcessor:
         return probe
 
     def _mathtype_preservation_probe(self) -> dict[str, Any]:
-        """Self-check existing MathType preservation and format fallback policy."""
+        """自检现有 MathType 保留与格式兜底策略。"""
         cached = getattr(self, "_mathtype_preservation_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -4233,7 +4225,7 @@ class TaskProcessor:
         return probe
 
     def _omml_mathtype_handoff_probe(self) -> dict[str, Any]:
-        """Self-check OMML-to-MathType local handoff contracts without native writeback."""
+        """自检 OMML 转 MathType 的交接约定，不执行原生写回。"""
         cached = getattr(self, "_omml_mathtype_handoff_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -4345,7 +4337,7 @@ class TaskProcessor:
         return probe
 
     def _local_api_security_probe(self) -> dict[str, Any]:
-        """Self-check local API token protection for sensitive handoff routes."""
+        """自检敏感交接接口的令牌保护。"""
         cached = getattr(self, "_local_api_security_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -4398,7 +4390,7 @@ class TaskProcessor:
         return probe
 
     def _local_result_upload_probe(self) -> dict[str, Any]:
-        """Self-check local result upload registration without transferring user files."""
+        """自检本地结果上传注册，不传输用户文件。"""
         cached = getattr(self, "_local_result_upload_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -4466,7 +4458,7 @@ class TaskProcessor:
         return probe
 
     def _local_install_platform_probe(self) -> dict[str, Any]:
-        """Self-check Windows/macOS installer contracts and CLI manifest summaries."""
+        """自检 Windows/macOS 安装包约定和客户端清单摘要。"""
         cached = getattr(self, "_local_install_platform_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -4554,7 +4546,7 @@ class TaskProcessor:
         return probe
 
     def _local_file_action_execution_probe(self) -> dict[str, Any]:
-        """Self-check authorized local file actions for OMML dependency copies only."""
+        """仅自检授权的 OMML 依赖复制文件动作。"""
         cached = getattr(self, "_local_file_action_execution_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -4630,7 +4622,7 @@ class TaskProcessor:
         return probe
 
     def _formula_format_scope_probe(self) -> dict[str, Any]:
-        """Self-check formula formatting scope options across supported ranges."""
+        """自检支持范围内的公式格式化选项。"""
         cached = getattr(self, "_formula_format_scope_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -4698,7 +4690,7 @@ class TaskProcessor:
         return probe
 
     def _macro_detection_probe(self) -> dict[str, Any]:
-        """Self-check macro detection and reporting from temporary macro-enabled files."""
+        """使用临时启用宏的文件自检宏检测与报告。"""
         cached = getattr(self, "_macro_detection_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -4760,7 +4752,7 @@ class TaskProcessor:
         return probe
 
     def _file_validation_probe(self) -> dict[str, Any]:
-        """Self-check corrupt and encrypted document classification using real signatures."""
+        """使用真实签名自检损坏与加密文档分类。"""
         cached = getattr(self, "_file_validation_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -4861,7 +4853,7 @@ class TaskProcessor:
         return probe
 
     def _ppt_formula_probe(self) -> dict[str, Any]:
-        """Self-check PPT formula hint extraction for PRD formula acceptance."""
+        """自检 PPT 公式线索提取以支持验收。"""
         cached = getattr(self, "_ppt_formula_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -4900,7 +4892,7 @@ class TaskProcessor:
         return probe
 
     def _omml_dependency_probe(self) -> dict[str, Any]:
-        """Self-check OMML dependency discovery and copy behavior in a temp directory."""
+        """在临时目录自检 OMML 依赖查找与复制。"""
         cached = getattr(self, "_omml_dependency_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -4954,11 +4946,11 @@ class TaskProcessor:
 
     @staticmethod
     def _omml_dependency_probe_current(probe: dict[str, Any]) -> str:
-        """Format OMML dependency probe evidence for the acceptance matrix."""
+        """为验收矩阵格式化 OMML 依赖探测证据。"""
         return str(probe.get("current") or "OMML 依赖自检未运行")
 
     def _mathpix_contract_probe(self) -> dict[str, Any]:
-        """Self-check Mathpix PDF-to-Word request contracts without external upload."""
+        """自检 Mathpix PDF 转 Word 请求约定，不进行外部上传。"""
         cached = getattr(self, "_mathpix_contract_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -5026,7 +5018,7 @@ class TaskProcessor:
         return probe
 
     def _pdf_ocr_contract_probe(self) -> dict[str, Any]:
-        """Self-check scanned PDF OCR contract and blocked upload risk."""
+        """自检扫描 PDF OCR 约定和上传风险阻断。"""
         cached = getattr(self, "_pdf_ocr_contract_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -5124,7 +5116,7 @@ class TaskProcessor:
         return probe
 
     def _pdf_retention_probe(self) -> dict[str, Any]:
-        """Self-check PDF image and table retention planning for Mathpix outputs."""
+        """自检 Mathpix 产物中的 PDF 图片与表格保留计划。"""
         cached = getattr(self, "_pdf_retention_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -5198,7 +5190,7 @@ class TaskProcessor:
         return probe
 
     def _pdf_formula_handoff_probe(self) -> dict[str, Any]:
-        """Self-check PDF formula OCR handoff to local MathType post-processing."""
+        """自检 PDF 公式 OCR 至本地 MathType 后处理的交接。"""
         cached = getattr(self, "_pdf_formula_handoff_probe_cache", None)
         if isinstance(cached, dict):
             return cached
@@ -5301,7 +5293,7 @@ class TaskProcessor:
         probe: dict[str, Any],
         mathpix_queue: dict[str, Any],
     ) -> str:
-        """Summarize Mathpix contract evidence and failed download counts."""
+        """汇总 Mathpix 约定证据及失败下载数量。"""
         history = "已有完成 DOCX" if has_completed_docx else ("已有任务或报告" if has_task_history else "无历史任务")
         total = mathpix_queue.get("summary", {}).get("total", 0)
         completed = mathpix_queue.get("summary", {}).get("completed", 0)
@@ -5309,7 +5301,7 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_acceptance_evidence(mathpix_queue: dict[str, Any], reports: list[dict[str, Any]]) -> dict[str, Any]:
-        """Summarize real Mathpix completion evidence for PRD acceptance items."""
+        """汇总真实 Mathpix 完成证据用于需求验收。"""
         jobs = [item for item in mathpix_queue.get("jobs", []) if isinstance(item, dict)]
         pdf_formula_count = 0
         for report in reports:
@@ -5382,7 +5374,7 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_manifest_output(recognition: dict[str, Any], output_type: str) -> dict[str, Any]:
-        """Return one Mathpix download manifest output row by artifact type."""
+        """按产物类型返回 Mathpix 下载清单记录。"""
         manifest = recognition.get("download_manifest") if isinstance(recognition.get("download_manifest"), dict) else {}
         outputs = manifest.get("outputs") if isinstance(manifest.get("outputs"), list) else []
         for item in outputs:
@@ -5392,12 +5384,12 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_output_downloaded_with_hash(output: dict[str, Any]) -> bool:
-        """Return whether a Mathpix manifest output was downloaded with integrity evidence."""
+        """检查 Mathpix 产物是否已下载且具备完整性证据。"""
         return str(output.get("status") or "") == "downloaded" and bool(output.get("sha256_available"))
 
     @staticmethod
     def _local_native_acceptance_evidence(tasks: list[dict[str, Any]]) -> dict[str, Any]:
-        """Summarize real native desktop execution reports for PRD acceptance."""
+        """汇总真实桌面原生执行报告用于需求验收。"""
         successful: dict[str, list[dict[str, Any]]] = {}
         for task in tasks:
             report = task.get("local_native_execution_report") if isinstance(task.get("local_native_execution_report"), dict) else {}
@@ -5498,7 +5490,7 @@ class TaskProcessor:
         }
 
     def product_summary(self) -> dict[str, Any]:
-        """Return PRD product capability coverage and staged roadmap status."""
+        """返回需求能力覆盖和分阶段路线图状态。"""
         settings = self.store.get_settings()
         files = self.store.list_files()
         tasks = self.store.list_tasks()
@@ -5540,7 +5532,7 @@ class TaskProcessor:
         }
 
     def enhancement_plan(self) -> dict[str, Any]:
-        """Return V3 enhancement contracts without asserting live AI execution."""
+        """返回 V3 增强约定，不声称执行实时 AI 功能。"""
         settings = self.store.get_settings()
         caps = self.capabilities()
         token_configured = bool(str(settings.get("localSecurityToken") or "").strip())
@@ -5632,7 +5624,7 @@ class TaskProcessor:
         }
 
     def install_plan(self, platform_name: str | None = None) -> dict[str, Any]:
-        """Build the Windows/macOS installer plan and MathType portability contract."""
+        """生成 Windows/macOS 安装计划及 MathType 可移植性约定。"""
         settings = self.store.get_settings()
         profile = self.install_profile(platform_name)
         spec = self._installer_spec(profile["platform"])
@@ -5715,7 +5707,7 @@ class TaskProcessor:
 
     @staticmethod
     def _install_formula_compatibility_contract(profile: dict[str, Any], compatibility_mode: str, compatibility_label: str, heartbeat_platform: str) -> dict[str, Any]:
-        """Build the installer formula compatibility contract for Windows/macOS boundaries."""
+        """生成 Windows/macOS 边界的安装公式兼容性约定。"""
         target = normalize_platform(str(profile.get("platform") or "Unknown"))
         heartbeat = normalize_platform(heartbeat_platform) if heartbeat_platform else ""
         native_mode = compatibility_mode == "platform-specific"
@@ -5773,14 +5765,14 @@ class TaskProcessor:
 
     @staticmethod
     def _heartbeat_platform(settings: dict[str, Any]) -> str:
-        """Normalize the platform reported by the latest local-client heartbeat."""
+        """规范最近客户端心跳报告的平台。"""
         heartbeat = settings.get("localClientHeartbeat") if isinstance(settings.get("localClientHeartbeat"), dict) else {}
         raw_platform = str(heartbeat.get("platform") or "").strip() if heartbeat else ""
         return normalize_platform(raw_platform) if raw_platform else ""
 
     @staticmethod
     def _installer_heartbeat_readiness(target_platform: str, heartbeat_platform: str) -> dict[str, Any]:
-        """Describe whether installer target and heartbeat platform are compatible."""
+        """说明安装目标与心跳平台是否兼容。"""
         target = normalize_platform(target_platform)
         if not heartbeat_platform:
             return {
@@ -5816,7 +5808,7 @@ class TaskProcessor:
         }
 
     def installer_download_info(self, file_name: str, requested_platform: str | None = None) -> dict[str, Any]:
-        """Validate an explicitly platform-scoped local installer download."""
+        """校验明确限定平台的本地安装包下载。"""
         safe_name = Path(file_name).name
         if safe_name != file_name:
             raise ValueError("Invalid installer name")
@@ -5863,7 +5855,7 @@ class TaskProcessor:
         }
 
     def local_client_manifest(self) -> dict[str, Any]:
-        """Return the local companion manifest for launch, heartbeat, and payload APIs."""
+        """返回启动、心跳和载荷接口的本地伴随清单。"""
         settings = self.store.get_settings()
         profile = self.install_profile()
         install_plan = self.install_plan(profile["platform"])
@@ -5871,6 +5863,7 @@ class TaskProcessor:
         port = int(settings.get("localApiPort") or 8765)
         origin = f"http://{host}:{port}"
         token_configured = bool(str(settings.get("localSecurityToken") or "").strip())
+        python_command = "python" if profile["platform"] == "Windows" else "python3"
         heartbeat = dict(settings.get("localClientHeartbeat") or {})
         package = install_plan.get("package", {}) if isinstance(install_plan.get("package"), dict) else {}
         installer_manifest = {
@@ -5940,10 +5933,10 @@ class TaskProcessor:
             },
             "companion_cli": {
                 "available": True,
-                "command": f"python3 -m k12.local_client --origin {origin} --token <K12_LOCAL_TOKEN>",
-                "native_plan_command": f"python3 -m k12.local_client --origin {origin} --token <K12_LOCAL_TOKEN> --native-plan",
-                "native_report_command": f"python3 -m k12.local_client --origin {origin} --token <K12_LOCAL_TOKEN> --native-report-json <report.json>",
-                "file_action_command": f"python3 -m k12.local_client --origin {origin} --token <K12_LOCAL_TOKEN> --execute-file-actions",
+                "command": f"{python_command} -m k12.local_client --origin {origin}",
+                "native_plan_command": f"{python_command} -m k12.local_client --origin {origin} --native-plan",
+                "native_report_command": f"{python_command} -m k12.local_client --origin {origin} --native-report-json <report.json>",
+                "file_action_command": f"{python_command} -m k12.local_client --origin {origin} --execute-file-actions",
                 "dry_run_supported": True,
                 "dry_run_execution_schema": "k12.localDryRunExecution.v1",
                 "native_plan_supported": True,
@@ -5953,10 +5946,12 @@ class TaskProcessor:
                 "file_actions_supported": True,
                 "file_action_execution_schema": "k12.localFileActionExecution.v1",
                 "macos_office_execution_supported": True,
+                "windows_office_execution_supported": True,
+                "windows_native_office_execution_schema": "k12.windowsOfficeTaskExecution.v1",
                 "native_office_execution_schema": "k12.macosOfficeTaskExecution.v1",
-                "native_office_command": f"python3 -m k12.local_client --origin {origin} --token <K12_LOCAL_TOKEN> --allow-native-execution --execute-native-office",
+                "native_office_command": f"python -m k12.local_client --origin {origin} --allow-native-execution --execute-native-office",
                 "executes_native_documents": True,
-                "description": "标准库本地伴随客户端可发送心跳、领取任务载荷、生成 dry-run/原生请求、桥接外部报告，执行 OMML 依赖复制等安全本地文件动作，并在双重显式授权下执行受支持的 macOS 旧 Word/PPT Office 转换；MathType、OMML 写回和 Word 宏仍保持阻断。",
+                "description": "本地伴随客户端支持心跳、任务载荷、模拟执行、原生请求、报告同步和 OMML 依赖复制等安全本地文件动作；双重显式授权后，可通过 Windows Office COM 或 macOS AppleScript 执行旧 Word/PPT 转换。MathType、OMML 写回和 Word 宏仍保持阻断。",
             },
             "endpoints": [
                 {"method": "GET", "path": "/api/tasks/{task_id}/local-payload", "auth": "configured-token", "sensitive": True},
@@ -5983,7 +5978,7 @@ class TaskProcessor:
         }
 
     def record_local_client_heartbeat(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Store a redacted local-client heartbeat and component capability summary."""
+        """保存脱敏客户端心跳及组件能力摘要。"""
         raw_capabilities = payload.get("capabilities") if isinstance(payload.get("capabilities"), dict) else {}
         capabilities = {
             str(key): value
@@ -6008,7 +6003,7 @@ class TaskProcessor:
 
     @staticmethod
     def _safe_local_client_preflight(preflight: Any) -> dict[str, Any]:
-        """Redact and normalize local-client preflight details from heartbeat payloads."""
+        """脱敏并规范心跳载荷中的预检详情。"""
         if not isinstance(preflight, dict):
             return {}
         raw_components = preflight.get("components") if isinstance(preflight.get("components"), dict) else {}
@@ -6037,7 +6032,7 @@ class TaskProcessor:
         }
 
     def local_result_upload_queue(self) -> dict[str, Any]:
-        """Return result-upload intents without exposing local output paths."""
+        """返回结果上传意图，不公开本地输出路径。"""
         settings = self.store.get_settings()
         cloud_allowed = bool(settings.get("allowCloudSync", False))
         items = [self._local_upload_item(task, cloud_allowed) for task in self.store.list_tasks()]
@@ -6059,7 +6054,7 @@ class TaskProcessor:
         }
 
     def local_result_upload_manifest(self, upload_id: str) -> dict[str, Any]:
-        """Return one upload receive contract with hashes and redacted paths."""
+        """返回含哈希与脱敏路径的上传接收约定。"""
         upload_id = str(upload_id or "").strip()
         if not upload_id:
             raise KeyError("Upload not found")
@@ -6126,7 +6121,7 @@ class TaskProcessor:
         raise KeyError("Upload not found")
 
     def register_local_result_upload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Register a token-gated local result upload after cloud-sync authorization."""
+        """获得云同步授权后注册令牌保护的本地结果上传。"""
         settings = self.store.get_settings()
         if not str(settings.get("localSecurityToken") or "").strip():
             raise ValueError("本地结果上传需要先配置本地安全令牌")
@@ -6202,7 +6197,7 @@ class TaskProcessor:
         return upload
 
     def mathpix_job_queue(self) -> dict[str, Any]:
-        """Summarize Mathpix PDF-to-Word jobs without triggering external uploads."""
+        """汇总 Mathpix PDF 转 Word 作业，不触发外部上传。"""
         settings = self.store.get_settings()
         jobs: list[dict[str, Any]] = []
         for report in self.store.list_reports():
@@ -6227,7 +6222,7 @@ class TaskProcessor:
         }
 
     def _mathpix_queue_item(self, report: dict[str, Any], job: dict[str, Any]) -> dict[str, Any]:
-        """Build a path-free Mathpix queue row from a report job record."""
+        """根据报告作业生成不含路径的 Mathpix 队列行。"""
         outputs = dict(job.get("outputs") or {})
         output_summaries = self._mathpix_output_summaries(job.get("output_summaries"))
         retention = dict(job.get("retention_plan") or {})
@@ -6303,7 +6298,7 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_request_summary(options: Any) -> dict[str, Any]:
-        """Summarize Mathpix request metadata without credentials or paths."""
+        """汇总 Mathpix 请求元数据，不含凭据或路径。"""
         raw = options if isinstance(options, dict) else {}
         formats = raw.get("conversion_formats") if isinstance(raw.get("conversion_formats"), dict) else {}
         return {
@@ -6316,7 +6311,7 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_status_label(status: str) -> str:
-        """Translate Mathpix job state into a user-facing status label."""
+        """将 Mathpix 作业状态转为用户可见标签。"""
         labels = {
             "authorization_required": "等待授权",
             "missing_credentials": "缺少凭证",
@@ -6331,7 +6326,7 @@ class TaskProcessor:
         return labels.get(status, status or "未知")
 
     def _local_upload_item(self, task: dict[str, Any], cloud_allowed: bool) -> dict[str, Any] | None:
-        """Build a path-free local result upload queue row."""
+        """生成不含路径的本地结果上传队列行。"""
         sync = dict(task.get("local_sync") or {})
         uploads = [item for item in list(task.get("local_result_uploads") or []) if isinstance(item, dict)]
         latest_upload = uploads[-1] if uploads else {}
@@ -6370,7 +6365,7 @@ class TaskProcessor:
 
     @classmethod
     def _local_upload_outputs(cls, outputs: Any) -> list[dict[str, Any]]:
-        """Sanitize local upload output summaries for queue responses."""
+        """清理上传输出摘要供队列响应使用。"""
         if not isinstance(outputs, list):
             return []
         cleaned: list[dict[str, Any]] = []
@@ -6391,7 +6386,7 @@ class TaskProcessor:
         return cleaned
 
     def _receive_local_upload_files(self, upload_id: str, files: Any) -> list[dict[str, Any]]:
-        """Receive an explicit local upload package into managed runtime storage."""
+        """接收明确提交的本地上传包至受管运行存储。"""
         if not isinstance(files, list):
             return []
         safe_upload_id = self._safe_output_name(upload_id)
@@ -6441,7 +6436,7 @@ class TaskProcessor:
 
     @staticmethod
     def _unique_cloud_upload_path(target: Path) -> Path:
-        """Reserve a unique managed path for one local upload file."""
+        """为本地上传文件保留唯一受管路径。"""
         if not target.exists():
             return target
         stem = target.stem or "output"
@@ -6454,7 +6449,7 @@ class TaskProcessor:
 
     @classmethod
     def _local_upload_manifest_files(cls, files: Any) -> list[dict[str, Any]]:
-        """Return sanitized file entries for a local upload manifest."""
+        """返回上传清单的已清理文件条目。"""
         if not isinstance(files, list):
             return []
         cleaned: list[dict[str, Any]] = []
@@ -6477,7 +6472,7 @@ class TaskProcessor:
 
     @classmethod
     def _local_upload_manifest_outputs(cls, outputs: Any) -> list[dict[str, Any]]:
-        """Return sanitized output summaries for a local upload manifest."""
+        """返回上传清单的已清理输出摘要。"""
         if not isinstance(outputs, list):
             return []
         cleaned: list[dict[str, Any]] = []
@@ -6505,18 +6500,18 @@ class TaskProcessor:
 
     @staticmethod
     def _safe_sha256(value: Any) -> str:
-        """Return a valid lowercase SHA256 string or an empty safe fallback."""
+        """返回合法小写 SHA256，无效时返回空字符串。"""
         text = str(value or "").strip().lower()
         return text if re.fullmatch(r"[0-9a-f]{64}", text) else ""
 
     @staticmethod
     def _safe_output_name(value: Any) -> str:
-        """Return a safe output display name without exposing local paths."""
+        """返回安全输出显示名，不暴露本地路径。"""
         text = str(value or "").strip().replace("\\", "/")
         return (Path(text).name or "output")[:160]
 
     def create_local_launch_request(self, task_id: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Create an authorized k12-local launch request for one task."""
+        """为任务创建已授权的 k12-local 启动请求。"""
         task = self.store.get_task(task_id)
         if not task:
             raise KeyError(f"Task not found: {task_id}")
@@ -6564,7 +6559,7 @@ class TaskProcessor:
 
     @staticmethod
     def _local_launch_origin(settings: dict[str, Any], requested: Any = None) -> str:
-        """Return the normalized loopback local API origin for launch URLs."""
+        """返回规范化的回环接口地址供启动链接使用。"""
         raw = str(requested or "").strip()
         if raw:
             parsed = urlparse(raw)
@@ -6575,7 +6570,7 @@ class TaskProcessor:
         return f"http://{host}:{port}"
 
     def _product_capability(self, key: str, title: str, status: str, evidence: str) -> dict[str, Any]:
-        """Build one product-summary capability row."""
+        """生成产品摘要能力行。"""
         labels = {
             "implemented": ("已落地", "good"),
             "contract": ("合同覆盖", "warn"),
@@ -6585,7 +6580,7 @@ class TaskProcessor:
         return {"key": key, "title": title, "status": status_label, "level": level, "evidence": evidence}
 
     def _product_phase(self, key: str, label: str, title: str, status: str, current: str) -> dict[str, Any]:
-        """Build one product roadmap phase row."""
+        """生成产品路线图阶段行。"""
         item = self._product_capability(key, f"{label}：{title}", status, current)
         item["phase"] = label
         return item
@@ -6599,7 +6594,7 @@ class TaskProcessor:
         inputs: list[str],
         guardrails: list[str],
     ) -> dict[str, Any]:
-        """Build one planned enhancement row with status and dependencies."""
+        """生成含状态与依赖的增强规划行。"""
         item = self._product_capability(key, title, status, evidence)
         item["inputs"] = inputs
         item["guardrails"] = guardrails
@@ -6607,7 +6602,7 @@ class TaskProcessor:
 
     @staticmethod
     def _installer_specs() -> dict[str, dict[str, str]]:
-        """Return the registered Windows and macOS installer specifications."""
+        """返回已注册的 Windows 和 macOS 安装包规格。"""
         return {
             "Windows": {"file_name": "K12-Local-Client-Windows-x64.msi", "installer_kind": "windows-msi", "extension": ".msi"},
             "macOS": {"file_name": "K12-Local-Client-macOS-universal.pkg", "installer_kind": "macos-pkg", "extension": ".pkg"},
@@ -6615,12 +6610,12 @@ class TaskProcessor:
         }
 
     def _installer_spec(self, platform_name: str) -> dict[str, str]:
-        """Return the installer spec for one normalized platform."""
+        """返回规范平台对应的安装包规格。"""
         specs = self._installer_specs()
         return specs.get(platform_name, specs["Unknown"])
 
     def _installer_steps(self, platform_name: str) -> list[dict[str, Any]]:
-        """Return platform-specific installation and MathType compatibility steps."""
+        """返回各平台安装和 MathType 兼容性步骤。"""
         common = [
             {"order": 1, "title": "下载安装包", "detail": "仅从本地 API 暴露的安装包地址下载，并核对 SHA256。"},
             {"order": 2, "title": "配置本地安全令牌", "detail": "安装后在设置页保存本地安全令牌，保护本地任务载荷和资源下载。"},
@@ -6642,7 +6637,7 @@ class TaskProcessor:
         ]
 
     def _sha256(self, path: Path) -> str:
-        """Return a SHA256 digest for a registered installer package."""
+        """计算注册安装包的 SHA256 摘要。"""
         digest = hashlib.sha256()
         with path.open("rb") as handle:
             for chunk in iter(lambda: handle.read(1024 * 1024), b""):
@@ -6650,7 +6645,7 @@ class TaskProcessor:
         return digest.hexdigest()
 
     def _architecture_layer(self, key: str, title: str, recommended: str, status: str, current: str) -> dict[str, Any]:
-        """Build one architecture blueprint layer row."""
+        """生成架构蓝图层级行。"""
         labels = {
             "implemented": ("已落地", "good"),
             "contract": ("合同覆盖", "warn"),
@@ -6667,7 +6662,7 @@ class TaskProcessor:
         }
 
     def local_task_payload(self, task_id: str) -> dict[str, Any]:
-        """Build a token-protected payload for desktop or hybrid task execution."""
+        """生成令牌保护的桌面或混合执行载荷。"""
         task = self.store.get_task(task_id)
         if not task:
             raise KeyError(f"Task not found: {task_id}")
@@ -6712,7 +6707,7 @@ class TaskProcessor:
         }
 
     def local_task_readiness(self, task_id: str) -> dict[str, Any]:
-        """Return redacted local-client readiness and desktop-plan status for a task."""
+        """返回任务的脱敏客户端就绪与桌面计划状态。"""
         task = self.store.get_task(task_id)
         if not task:
             raise KeyError(f"Task not found: {task_id}")
@@ -6746,7 +6741,7 @@ class TaskProcessor:
         }
 
     def _local_payload_workflow_plan(self, task: dict[str, Any]) -> dict[str, Any]:
-        """Return the draggable workflow order embedded in a local task payload."""
+        """返回本地载荷中的拖拽工作流顺序。"""
         options = task.get("options") if isinstance(task.get("options"), dict) else {}
         plan = options.get("workflowPlan") if isinstance(options.get("workflowPlan"), dict) else {}
         if not plan:
@@ -6763,7 +6758,7 @@ class TaskProcessor:
         }
 
     def _latest_report_for_task(self, task_id: str) -> dict[str, Any] | None:
-        """Return the latest stored report associated with one task id."""
+        """返回指定任务最新的已保存报告。"""
         for report in self.store.list_reports():
             if report.get("task_id") == task_id:
                 return report
@@ -6771,7 +6766,7 @@ class TaskProcessor:
 
     @staticmethod
     def _local_handoff_status(requires_local: bool, settings: dict[str, Any]) -> dict[str, Any]:
-        """Describe local-client launch authorization and token readiness."""
+        """说明客户端启动授权和令牌就绪情况。"""
         client_enabled = bool(settings.get("localClientEnabled", True))
         web_launch_allowed = bool(settings.get("allowWebLaunchLocalClient", False))
         token_required = bool(str(settings.get("localSecurityToken") or "").strip())
@@ -6797,7 +6792,7 @@ class TaskProcessor:
         }
 
     def _local_client_readiness(self, requires_local: bool, actions: list[dict[str, Any]], settings: dict[str, Any]) -> dict[str, Any]:
-        """Summarize heartbeat, platform, and capability readiness for local handoff."""
+        """汇总心跳、平台和能力的本地交接就绪状态。"""
         heartbeat = settings.get("localClientHeartbeat") if isinstance(settings.get("localClientHeartbeat"), dict) else {}
         raw_preflight = heartbeat.get("preflight") if isinstance(heartbeat.get("preflight"), dict) else {}
         preflight = self._safe_local_client_preflight(raw_preflight) if raw_preflight else {}
@@ -6862,7 +6857,7 @@ class TaskProcessor:
 
     @staticmethod
     def _configured_local_client_platform(settings: dict[str, Any]) -> str:
-        """Normalize the configured local-client platform selection."""
+        """规范配置的本地客户端平台。"""
         configured = str(settings.get("localClientPlatform") or "auto")
         if configured.strip().lower() == "auto":
             return "auto"
@@ -6870,7 +6865,7 @@ class TaskProcessor:
 
     @staticmethod
     def _local_platform_compatibility_message(expected: str, actual: str, mismatch: bool) -> str:
-        """Explain Windows/macOS MathType platform compatibility for handoff."""
+        """说明 Windows/macOS MathType 平台交接兼容性。"""
         if mismatch:
             return f"安装计划目标为 {expected}，但当前心跳来自 {actual}；Windows 与 macOS MathType 对象不通用，请切换客户端或使用 MathML/LaTeX/图片兜底。"
         if expected in {"Windows", "macOS"} and actual in {"Windows", "macOS"}:
@@ -6881,7 +6876,7 @@ class TaskProcessor:
 
     @staticmethod
     def _local_client_capabilities(heartbeat: dict[str, Any], preflight: dict[str, Any]) -> dict[str, Any]:
-        """Merge trusted heartbeat and preflight capability flags."""
+        """合并可信心跳与预检能力标记。"""
         merged: dict[str, Any] = {}
         raw_heartbeat = heartbeat.get("capabilities") if isinstance(heartbeat.get("capabilities"), dict) else {}
         raw_preflight = preflight.get("capabilities") if isinstance(preflight.get("capabilities"), dict) else {}
@@ -6893,7 +6888,7 @@ class TaskProcessor:
 
     @staticmethod
     def _required_local_client_capabilities(actions: list[dict[str, Any]]) -> list[str]:
-        """Derive native desktop capability requirements from local actions."""
+        """根据本地动作推导桌面原生能力要求。"""
         required: list[str] = []
         for action in actions:
             action_type = str(action.get("type") or "")
@@ -6910,13 +6905,13 @@ class TaskProcessor:
 
     @staticmethod
     def _local_capability_available(value: Any) -> bool:
-        """Interpret a local-client capability value as a boolean availability flag."""
+        """将客户端能力值解释为可用性布尔标记。"""
         if isinstance(value, str):
             return value.strip().lower() in {"1", "true", "yes", "available", "ok", "ready", "enabled"}
         return bool(value)
 
     def _local_action_summary(self, action: dict[str, Any]) -> dict[str, Any]:
-        """Return a redacted summary for one local payload action."""
+        """返回本地载荷动作的脱敏摘要。"""
         action_type = str(action.get("type") or "")
         required = self._required_local_client_capabilities([action])
         return {
@@ -6942,7 +6937,7 @@ class TaskProcessor:
         readiness: dict[str, Any],
         include_sensitive_paths: bool,
     ) -> dict[str, Any]:
-        """Build a desktop execution plan without performing native document actions."""
+        """生成桌面执行计划，不执行原生文档动作。"""
         readiness_status = str(readiness.get("status") or "")
         plan_status_map = {
             "ready_for_handoff": "ready_for_native_client",
@@ -6955,7 +6950,7 @@ class TaskProcessor:
         plan_status = plan_status_map.get(readiness_status, "pending_preflight")
         native_action_count = sum(1 for action in actions if str(action.get("type") or "") != "open_output_directory")
         companion_office_execution = bool(
-            readiness.get("platform") == "macOS"
+            readiness.get("platform") in {"Windows", "macOS"}
             and any(str(action.get("type") or "") == "office_conversion" for action in actions)
         )
         formula_delivery = self._local_formula_delivery_contract(settings)
@@ -7018,7 +7013,7 @@ class TaskProcessor:
         readiness: dict[str, Any],
         include_sensitive_paths: bool,
     ) -> dict[str, Any]:
-        """Build one native action contract for the desktop execution plan."""
+        """生成桌面计划的原生动作约定。"""
         action_type = str(action.get("type") or "")
         required_keys = self._required_local_client_capabilities([action])
         missing = set(str(key) for key in readiness.get("missing_capabilities") or [])
@@ -7079,7 +7074,7 @@ class TaskProcessor:
 
     @staticmethod
     def _desktop_action_gate_status(action_type: str, required_keys: list[str], missing: set[str], readiness: dict[str, Any]) -> str:
-        """Classify whether one desktop action may be handed to the native runner."""
+        """判断桌面动作能否交接原生执行器。"""
         if action_type == "open_output_directory":
             return "ready"
         if readiness.get("status") == "platform_mismatch":
@@ -7093,7 +7088,7 @@ class TaskProcessor:
         return "pending"
 
     def _desktop_action_output_contract(self, action_type: str, task: dict[str, Any], settings: dict[str, Any], include_sensitive_paths: bool) -> dict[str, Any]:
-        """Describe expected output artifacts and path redaction for one action."""
+        """描述动作预期产物及路径脱敏规则。"""
         task_type = str(task.get("task_type") or "")
         artifact_types = {
             "word_to_ppt": ["pptx"],
@@ -7128,7 +7123,7 @@ class TaskProcessor:
 
     @staticmethod
     def _desktop_action_steps(action_type: str, action: dict[str, Any], task: dict[str, Any], settings: dict[str, Any]) -> list[dict[str, Any]]:
-        """Return ordered native-runner steps for a desktop action contract."""
+        """返回桌面动作约定的有序执行步骤。"""
         if action_type == "macro_sequence":
             return [
                 {"order": 1, "operation": "macro.backup", "title": "创建执行前备份", "required": bool(settings.get("macroBackup", True))},
@@ -7174,7 +7169,7 @@ class TaskProcessor:
         ]
 
     def _local_payload_snapshot_files(self, task: dict[str, Any], files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Use verified task snapshots for sensitive desktop handoff paths."""
+        """使用校验过的任务快照提供敏感桌面输入路径。"""
         snapshots = {
             str(item.get("file_id") or ""): item
             for item in task.get("source_snapshots") or []
@@ -7204,7 +7199,7 @@ class TaskProcessor:
 
     @staticmethod
     def _local_payload_file(file: dict[str, Any]) -> dict[str, Any]:
-        """Return a sensitive local payload file row for the companion client."""
+        """返回伴随客户端所需的敏感文件载荷行。"""
         input_path = str(file.get("storage_path") or file.get("file_path") or "")
         path = Path(input_path) if input_path else None
         return {
@@ -7233,7 +7228,7 @@ class TaskProcessor:
         }
 
     def _local_payload_actions(self, task: dict[str, Any], files: list[dict[str, Any]], report: dict[str, Any] | None) -> list[dict[str, Any]]:
-        """Build local-client action contracts from task type and report evidence."""
+        """根据任务与报告证据生成客户端动作约定。"""
         task_type = str(task.get("task_type") or "")
         analysis = dict((report or {}).get("analysis") or {})
         formula_delivery = self._local_formula_delivery_contract(self.store.get_settings())
@@ -7332,7 +7327,7 @@ class TaskProcessor:
         return actions
 
     def _omml_retry_requests(self, report: dict[str, Any] | None) -> list[dict[str, Any]]:
-        """Return OMML retry requests created by manual correction annotations."""
+        """返回手动更正标注创建的 OMML 重试请求。"""
         if not report:
             return []
         report_id = str(report.get("id") or "")
@@ -7372,7 +7367,7 @@ class TaskProcessor:
         return requests
 
     def _formula_recognition_requests(self, report: dict[str, Any] | None) -> list[dict[str, Any]]:
-        """Return formula re-recognition requests safe for local handoff payloads."""
+        """返回可安全交接本地端的公式重识别请求。"""
         if not report:
             return []
         report_id = str(report.get("id") or "")
@@ -7413,7 +7408,7 @@ class TaskProcessor:
 
     @staticmethod
     def _pdf_formula_action_status(mathpix_jobs: list[dict[str, Any]], pdf_formulas: list[dict[str, Any]]) -> str:
-        """Classify PDF formula MathType handoff status from Mathpix jobs."""
+        """根据 Mathpix 作业判断 PDF 公式 MathType 交接状态。"""
         if pdf_formulas:
             return "queued"
         if not mathpix_jobs:
@@ -7431,7 +7426,7 @@ class TaskProcessor:
 
     @staticmethod
     def _local_pdf_formula_job_summary(job: dict[str, Any]) -> dict[str, Any]:
-        """Return a redacted Mathpix job summary for PDF formula handoff."""
+        """返回 PDF 公式交接使用的脱敏 Mathpix 作业摘要。"""
         recognition = dict(job.get("recognition_plan") or {})
         retention = dict(job.get("retention_plan") or {})
         return {
@@ -7446,7 +7441,7 @@ class TaskProcessor:
         }
 
     def _local_payload_sync(self, settings: dict[str, Any], task: dict[str, Any]) -> dict[str, Any]:
-        """Describe local result sync policy and managed output directory."""
+        """说明本地结果同步策略与受管输出目录。"""
         return {
             "local_output_directory": str(self.store.output_task_dir(str(task.get("id") or ""))),
             "result_upload_allowed": bool(settings.get("allowCloudSync", False)),
@@ -7456,7 +7451,7 @@ class TaskProcessor:
         }
 
     def _local_formula_delivery_contract(self, settings: dict[str, Any]) -> dict[str, Any]:
-        """Return the same-platform MathType and fallback formula delivery contract."""
+        """返回 MathType 同平台与公式兜底交付约定。"""
         profile = self.install_profile()
         platform_name = str(profile.get("platform") or "Unknown")
         mode = str(settings.get("mathtypeCompatibilityMode") or "platform-specific")
@@ -7496,7 +7491,7 @@ class TaskProcessor:
 
     @staticmethod
     def _local_payload_settings(settings: dict[str, Any]) -> dict[str, Any]:
-        """Return non-secret settings relevant to local-client task execution."""
+        """返回客户端执行相关的非秘密设置。"""
         keys = [
             "localClientPlatform",
             "mathtypeCompatibilityMode",
@@ -7517,7 +7512,7 @@ class TaskProcessor:
 
     @staticmethod
     def _local_payload_report(report: dict[str, Any] | None) -> dict[str, Any]:
-        """Return report availability and summary counts for a local payload."""
+        """返回本地载荷的报告可用性及摘要计数。"""
         if not report:
             return {"available": False}
         return {
@@ -7531,12 +7526,12 @@ class TaskProcessor:
         }
 
     def install_profile(self, platform_name: str | None = None) -> dict[str, Any]:
-        """Return the selected Windows/macOS install profile from current settings."""
+        """返回所选平台安装配置的副本，包含公式互操作规则。"""
         return install_profile(platform_name, self.store.get_settings())
 
     @staticmethod
     def _macro_capability_status(flags: dict[str, Any], settings: dict[str, Any]) -> str:
-        """Describe macro queue availability from platform flags and settings."""
+        """根据平台标记与设置说明宏队列可用性。"""
         if not settings.get("enableMacroExecution", True):
             return "宏执行队列已禁用"
         status = "Windows 本地客户端授权后执行" if flags.get("macroExecution") else "当前平台不直接执行宏，生成本地执行队列"
@@ -7545,7 +7540,7 @@ class TaskProcessor:
         return status
 
     def macro_library(self) -> list[dict[str, Any]]:
-        """Return built-in macro choices with usage metadata."""
+        """返回内置宏选择与使用元数据。"""
         macro_specs = [
             (MacroItem("NormalizeHeadingStyles", "系统内置", "统一标题层级与样式", 1, id="macro_normalize_heading_styles"), "样式统一"),
             (MacroItem("CleanEmptyParagraphs", "系统内置", "清理空段落和多余换行", 2, id="macro_clean_empty_paragraphs"), "清理排版"),
@@ -7566,7 +7561,7 @@ class TaskProcessor:
         return items
 
     def _macro_usage_index(self) -> dict[str, dict[str, Any]]:
-        """Aggregate macro usage counts from existing reports."""
+        """从已有报告累计宏使用次数。"""
         usage: dict[str, dict[str, Any]] = {}
         for report in self.store.list_reports():
             timestamp = str(report.get("created_at") or "")
@@ -7581,11 +7576,11 @@ class TaskProcessor:
         return usage
 
     def list_macro_templates(self) -> list[dict[str, Any]]:
-        """Return saved macro execution-order templates."""
+        """返回已保存的宏执行顺序模板。"""
         return self.store.list_macro_templates()
 
     def save_macro_template(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Validate and persist a reusable ordered macro sequence."""
+        """校验并保存可复用的有序宏序列。"""
         self._assert_permission("templates.manage")
         library = {macro["id"]: macro for macro in self.macro_library()}
         sequence: list[dict[str, Any]] = []
@@ -7624,16 +7619,16 @@ class TaskProcessor:
         )
 
     def delete_macro_template(self, template_id: str) -> bool:
-        """Delete one saved macro execution-order template."""
+        """删除已保存的宏执行顺序模板。"""
         self._assert_permission("templates.manage")
         return self.store.delete_macro_template(template_id)
 
     def list_image_annotations(self, report_id: str | None = None) -> list[dict[str, Any]]:
-        """Return image review annotations globally or for one report."""
+        """返回全部或指定报告的图片审阅标注。"""
         return self.store.list_image_annotations(report_id)
 
     def save_image_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Validate and persist a manual small-image review decision."""
+        """校验并保存手动小图片审阅决定。"""
         if not payload.get("image_id") or not payload.get("report_id"):
             raise ValueError("图片标记需要 image_id 和 report_id")
         status = str(payload.get("status") or "误判")
@@ -7648,7 +7643,7 @@ class TaskProcessor:
         return self.store.save_image_annotation(payload)
 
     def save_image_replacement(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Store a replacement image asset and mark it for local writeback."""
+        """保存替换图片资源并标记本地写回需求。"""
         file_name = self._safe_file_name(str(payload.get("file_name") or payload.get("fileName") or "replacement.png"))
         mime_type = str(payload.get("mime_type") or payload.get("mimeType") or "").lower()
         extension = Path(file_name).suffix.lower() or REPLACEMENT_IMAGE_MIME_SUFFIXES.get(mime_type, ".png")
@@ -7688,7 +7683,7 @@ class TaskProcessor:
         return annotation
 
     def reexport_image_asset(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Re-export an extracted image from its original source document."""
+        """从原始源文档重新导出图片。"""
         report_id = str(payload.get("report_id") or payload.get("reportId") or "")
         image_id = str(payload.get("image_id") or payload.get("imageId") or "")
         if not report_id or not image_id:
@@ -7726,12 +7721,12 @@ class TaskProcessor:
         return {"reexported": True, "message": "图片已重新导出", "image": image, "report": report}
 
     def _persist_updated_report(self, report: dict[str, Any]) -> dict[str, Any]:
-        """Rewrite report artifacts and persist the updated report record."""
+        """重写报告文件并保存更新后的记录。"""
         self.report_builder.rewrite(report)
         return self.store.save_report(report)
 
     def _reexport_image_bytes(self, report: dict[str, Any], image: dict[str, Any]) -> tuple[bytes, str]:
-        """Read original image bytes from a managed source for re-export."""
+        """从受管源读取原始图片字节供重新导出。"""
         file_id = str(image.get("file_id") or "")
         source_file = self.store.get_file(file_id) or next((item for item in report.get("files", []) if item.get("id") == file_id), None)
         if not source_file:
@@ -7765,7 +7760,7 @@ class TaskProcessor:
 
     @staticmethod
     def _image_asset_extension(source_name: str, image_type: str) -> str:
-        """Choose a safe extension for an extracted or re-exported image asset."""
+        """为提取或重新导出的图片选择安全扩展名。"""
         extension = Path(source_name).suffix.lower()
         if extension:
             return extension
@@ -7777,15 +7772,15 @@ class TaskProcessor:
         return ".bin"
 
     def delete_image_annotation(self, annotation_id: str) -> bool:
-        """Delete one image review annotation."""
+        """删除图片审阅标注。"""
         return self.store.delete_image_annotation(annotation_id)
 
     def list_formula_annotations(self, report_id: str | None = None) -> list[dict[str, Any]]:
-        """Return formula review annotations globally or for one report."""
+        """返回全部或指定报告的公式审阅标注。"""
         return self.store.list_formula_annotations(report_id)
 
     def save_formula_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Validate and persist a manual formula correction or confirmation."""
+        """校验并保存手动公式更正或确认。"""
         formula_id = str(payload.get("formula_id") or payload.get("formulaId") or "")
         report_id = str(payload.get("report_id") or payload.get("reportId") or "")
         if not formula_id or not report_id:
@@ -7816,7 +7811,7 @@ class TaskProcessor:
         return self.store.save_formula_annotation(annotation_payload)
 
     def _formula_recognition_request(self, report: dict[str, Any], formula: dict[str, Any]) -> dict[str, Any]:
-        """Build a re-recognition contract without calling Mathpix or desktop tools."""
+        """生成重识别约定，不调用 Mathpix 或桌面工具。"""
         settings = self.store.get_settings()
         source_type = str(formula.get("source_type") or "").strip() or "未知"
         source_file = next((file for file in report.get("files", []) if file.get("id") == formula.get("file_id")), {})
@@ -7873,7 +7868,7 @@ class TaskProcessor:
         return request
 
     def bulk_confirm_formulas(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Confirm high-confidence formulas in bulk for one report."""
+        """批量确认指定报告中的高置信度公式。"""
         report_id = str(payload.get("report_id") or "")
         if not report_id:
             raise ValueError("批量确认需要 report_id")
@@ -7904,15 +7899,15 @@ class TaskProcessor:
         return {"annotations": annotations, "confirmed_count": len(annotations), "min_confidence": min_confidence}
 
     def delete_formula_annotation(self, annotation_id: str) -> bool:
-        """Delete one formula review annotation."""
+        """删除公式审阅标注。"""
         return self.store.delete_formula_annotation(annotation_id)
 
     def list_omml_annotations(self, report_id: str | None = None) -> list[dict[str, Any]]:
-        """Return OMML dependency annotations globally or for one report."""
+        """返回全部或指定报告的 OMML 依赖标注。"""
         return self.store.list_omml_annotations(report_id)
 
     def save_omml_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Validate and persist an OMML conversion or dependency decision."""
+        """校验并保存 OMML 转换或依赖决定。"""
         dependency_id = str(payload.get("dependency_id") or payload.get("dependencyId") or "")
         report_id = str(payload.get("report_id") or payload.get("reportId") or "")
         if not dependency_id or not report_id:
@@ -7929,15 +7924,15 @@ class TaskProcessor:
         return self.store.save_omml_annotation({**payload, "dependency_id": dependency_id, "report_id": report_id, "status": status})
 
     def delete_omml_annotation(self, annotation_id: str) -> bool:
-        """Delete one OMML dependency annotation."""
+        """删除 OMML 依赖标注。"""
         return self.store.delete_omml_annotation(annotation_id)
 
     def list_layout_annotations(self, report_id: str | None = None) -> list[dict[str, Any]]:
-        """Return layout correction notes globally or for one report."""
+        """返回全部或指定报告的排版更正备注。"""
         return self.store.list_layout_annotations(report_id)
 
     def save_layout_annotation(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Validate and persist a manual layout correction note."""
+        """校验并保存手动排版更正备注。"""
         report_id = str(payload.get("report_id") or payload.get("reportId") or "")
         location = str(payload.get("location") or payload.get("position") or "").strip()
         if not report_id or not location:
@@ -7953,11 +7948,11 @@ class TaskProcessor:
         return self.store.save_layout_annotation({**payload, "report_id": report_id, "location": location, "issue_type": issue_type, "status": status})
 
     def delete_layout_annotation(self, annotation_id: str) -> bool:
-        """Delete one layout correction note."""
+        """删除排版更正备注。"""
         return self.store.delete_layout_annotation(annotation_id)
 
     def _register_archive_entries(self, archive_path: Path, parent: FileItem, analyzer: DocumentAnalyzer) -> list[dict[str, Any]]:
-        """Extract supported archive entries into managed upload storage."""
+        """将支持的压缩包条目提取至受管上传存储。"""
         items: list[dict[str, Any]] = []
         extract_dir = self.store.uploads_dir / parent.id
         extract_dir.mkdir(parents=True, exist_ok=True)
@@ -8004,7 +7999,7 @@ class TaskProcessor:
         return items
 
     def _resolve_duplicate_file_name(self, file_name: str, strategy: str) -> str | None:
-        """Resolve upload name conflicts using skip, overwrite, or rename policy."""
+        """按跳过、覆盖或重命名策略处理上传名称冲突。"""
         name = self._safe_file_name(file_name)
         files = self.store.list_files()
         duplicates = [file for file in files if file.get("file_name") == name]
@@ -8019,13 +8014,13 @@ class TaskProcessor:
         return self._unique_file_name(name, {str(file.get("file_name") or "") for file in files})
 
     def _find_existing_file(self, file_name: str) -> dict[str, Any] | None:
-        """Find a stored file by its sanitized display name."""
+        """按已清理显示名查找存储的文件。"""
         name = self._safe_file_name(file_name)
         return next((file for file in self.store.list_files() if file.get("file_name") == name), None)
 
     @staticmethod
     def _unique_file_name(file_name: str, existing_names: set[str]) -> str:
-        """Return a non-conflicting display file name."""
+        """返回无冲突的显示文件名。"""
         path = Path(file_name)
         stem = path.stem or "unnamed"
         suffix = path.suffix
@@ -8037,26 +8032,30 @@ class TaskProcessor:
 
     @staticmethod
     def _safe_file_name(file_name: str) -> str:
-        """Sanitize one filename segment for managed storage."""
-        name = Path(file_name or "unnamed").name.strip() or "unnamed"
-        return ILLEGAL_FILE_CHARS.sub("_", name)
+        """清理受管存储使用的单段文件名。"""
+        name = str(file_name or "unnamed").replace("\\", "/").rsplit("/", 1)[-1].strip()
+        name = ILLEGAL_FILE_CHARS.sub("_", name).rstrip(" .") or "unnamed"
+        # Windows 将这些名称解释为设备，即使带扩展名也无法作为普通文件创建。
+        if re.fullmatch(r"CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³]", name.split(".", 1)[0].rstrip().upper()):
+            name = "_" + name
+        return name
 
     @staticmethod
     def _safe_relative_path(file_name: str) -> str:
-        """Sanitize an archive-relative path without allowing traversal."""
+        """清理压缩包相对路径，阻止路径穿越。"""
         parts: list[str] = []
         for raw_part in str(file_name or "").replace("\\", "/").split("/"):
             part = raw_part.strip()
             if not part or part in {".", ".."}:
                 continue
-            safe = ILLEGAL_FILE_CHARS.sub("_", part)
+            safe = TaskProcessor._safe_file_name(part)
             if safe:
                 parts.append(safe)
         return "/".join(parts)
 
     @staticmethod
     def _non_negative_int(value: Any, default: int) -> int:
-        """Parse a value as a non-negative integer with fallback."""
+        """读取非负整数，无效时使用兜底值。"""
         try:
             return max(0, int(value))
         except (TypeError, ValueError):
@@ -8064,7 +8063,7 @@ class TaskProcessor:
 
     @staticmethod
     def _positive_int(value: Any, default: int) -> int:
-        """Parse a value as a positive integer with fallback."""
+        """读取正整数，无效时使用兜底值。"""
         try:
             return max(1, int(value))
         except (TypeError, ValueError):
@@ -8072,7 +8071,7 @@ class TaskProcessor:
 
     @staticmethod
     def _parse_utc(value: str) -> datetime | None:
-        """Parse an ISO timestamp and normalize it to UTC."""
+        """解析 ISO 时间戳并规范为 UTC。"""
         if not value:
             return None
         try:
@@ -8085,7 +8084,7 @@ class TaskProcessor:
 
     @staticmethod
     def _safe_archive_name(file_name: str) -> str:
-        """Return a traversal-safe archive entry name."""
+        """返回防止路径穿越的压缩包条目名。"""
         parts: list[str] = []
         for raw_part in str(file_name or "").replace("\\", "/").split("/"):
             part = raw_part.strip()
@@ -8097,7 +8096,7 @@ class TaskProcessor:
         return "/".join(parts) or "unnamed"
 
     def _stages_for(self, task_type: str, execute_mode: str) -> list[str]:
-        """Return user-facing processing stages for a task type."""
+        """返回任务类型的用户可见处理阶段。"""
         base = [
             "读取文件元数据并校验格式",
             "识别文档类型与处理能力",
@@ -8122,7 +8121,7 @@ class TaskProcessor:
 
     @staticmethod
     def _task_log_category(task_type: str) -> str:
-        """Map a task type to its log category."""
+        """将任务类型映射为日志类别。"""
         if task_type in {"word_to_ppt", "ppt_to_word", "pdf_to_word", "excel_to_pdf", "excel_to_word", "excel_to_ppt", "batch_process"}:
             return "conversion"
         if task_type in {"formula_precheck", "mathtype_format"}:
@@ -8136,7 +8135,7 @@ class TaskProcessor:
         return "system"
 
     def _build_analysis(self, task: dict[str, Any], files: list[dict[str, Any]]) -> dict[str, Any]:
-        """Build formula, macro, and small-image analysis for one task."""
+        """生成任务公式、宏和小图片分析。"""
         settings = self.store.get_settings()
         formulas: list[dict[str, Any]] = []
         macros: list[dict[str, Any]] = []
@@ -8160,7 +8159,7 @@ class TaskProcessor:
         return {"formulas": formulas, "macros": macros, "smallImages": images, "imageExtractionErrors": image_errors}
 
     def _batch_results(self, task: dict[str, Any], files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Build per-file batch results while respecting skip decisions."""
+        """遵守跳过决定生成逐文件批量结果。"""
         skipped_file_ids = self._batch_skipped_file_ids(task)
         results: list[dict[str, Any]] = []
         for index, file in enumerate(files, start=1):
@@ -8186,7 +8185,7 @@ class TaskProcessor:
         return results
 
     def _batch_plan(self, task: dict[str, Any], files: list[dict[str, Any]], results: list[dict[str, Any]]) -> dict[str, Any]:
-        """Build a batch scheduling summary with concurrency and failure policy."""
+        """生成包含并发数与失败策略的批量调度摘要。"""
         settings = self.store.get_settings()
         failure_strategy = str(task.get("options", {}).get("batchFailureStrategy") or task.get("options", {}).get("failureStrategy") or "跳过")
         try:
@@ -8220,14 +8219,14 @@ class TaskProcessor:
 
     @staticmethod
     def _batch_skipped_file_ids(task: dict[str, Any]) -> list[str]:
-        """Return batch file ids the user chose to skip."""
+        """返回用户选择跳过的批量文件标识。"""
         raw_ids = task.get("skipped_file_ids") or task.get("skippedFileIds") or []
         if isinstance(raw_ids, str):
             raw_ids = [raw_ids]
         return [str(file_id) for file_id in raw_ids if str(file_id)]
 
     def _latest_batch_result(self, task_id: str, file_id: str) -> dict[str, Any]:
-        """Return the most recent batch result for one task/file pair."""
+        """返回指定任务和文件最近的批量结果。"""
         reports = [report for report in self.store.list_reports() if report.get("task_id") == task_id]
         for report in reports:
             for item in report.get("analysis", {}).get("batchResults", []):
@@ -8237,7 +8236,7 @@ class TaskProcessor:
 
     @staticmethod
     def _suggested_tasks_for_file(file: dict[str, Any]) -> list[str]:
-        """Suggest follow-up task types from detected file capabilities."""
+        """根据检测到的文件能力建议后续任务类型。"""
         file_type = file.get("file_type")
         tasks: list[str] = []
         if file_type == "Word":
@@ -8263,7 +8262,7 @@ class TaskProcessor:
         return list(dict.fromkeys(tasks))
 
     def _omml_dependency_jobs(self, task: dict[str, Any], files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Build OMML dependency search and copy jobs without editing documents."""
+        """生成 OMML 依赖查找与复制作业，不编辑文档。"""
         settings = self.store.get_settings()
         jobs: list[dict[str, Any]] = []
         if not settings.get("enableOmmlPrecheck", True):
@@ -8307,7 +8306,7 @@ class TaskProcessor:
         return jobs
 
     def _omml_conversion_prompts(self, task: dict[str, Any], files: list[dict[str, Any]], dependencies: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Build OMML-to-MathType conversion prompts for Word files."""
+        """为 Word 生成 OMML 转 MathType 提示。"""
         settings = self.store.get_settings()
         dependencies_by_file = {item.get("file_id"): item for item in dependencies}
         prompts: list[dict[str, Any]] = []
@@ -8352,7 +8351,7 @@ class TaskProcessor:
 
     @staticmethod
     def _omml_conversion_decision(task: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
-        """Resolve whether OMML formulas should be converted to MathType."""
+        """确定 OMML 公式是否应转为 MathType。"""
         options = task.get("options") or {}
         word_options = options.get("word") or {}
         for key in ("convertOmmlToMathType", "confirmOmmlConversion", "convert_omml_to_mathtype"):
@@ -8366,7 +8365,7 @@ class TaskProcessor:
         return {"convert_to_mathtype": None, "source": "未确认"}
 
     def _set_file_omml_dependency_missing(self, file: dict[str, Any], missing: bool) -> None:
-        """Persist the OMML dependency missing flag back onto a Word file."""
+        """将 OMML 依赖缺失标记保存回 Word 记录。"""
         if file.get("file_type") != "Word" or not file.get("has_omml"):
             return
         file["missing_omml_dependency"] = bool(missing)
@@ -8376,7 +8375,7 @@ class TaskProcessor:
         self.store.save_file(file)
 
     def _manual_omml_dependency(self, settings: dict[str, Any]) -> Path | None:
-        """Return a configured manual OMML dependency path when valid."""
+        """配置的手动 OMML 依赖路径有效时返回该路径。"""
         if not settings.get("allowManualOmml", True):
             return None
         raw_path = str(settings.get("manualOmmlPath") or "").strip()
@@ -8390,14 +8389,12 @@ class TaskProcessor:
         return None
 
     def _find_omml_dependency(self, document_path: Path, settings: dict[str, Any]) -> Path | None:
-        """Search configured local directories for an OMML dependency file."""
+        """在配置的本地目录中查找 OMML 依赖。"""
         candidates = self._omml_candidate_dirs(document_path, settings)
         max_files = int(settings.get("ommlSearchMaxFiles", 3000) or 3000)
         scanned = 0
         searchable = [directory for directory in candidates if directory.exists() and directory.is_dir()]
-        # Check every candidate root before recursive scanning. A document in
-        # the first directory must not consume a small global scan budget and
-        # prevent discovery of a directly configured dependency file.
+        # 递归扫描前检查所有候选根目录，避免首个目录耗尽预算而遗漏明确配置的依赖。
         for directory in searchable:
             direct = self._find_direct_omml_file(directory)
             if direct:
@@ -8414,13 +8411,11 @@ class TaskProcessor:
         return None
 
     def _omml_candidate_dirs(self, document_path: Path, settings: dict[str, Any]) -> list[Path]:
-        """Return ordered candidate directories for OMML dependency lookup."""
+        """返回按优先级排列的 OMML 依赖候选目录。"""
         candidates: list[Path] = []
         if document_path.exists():
             candidates.append(document_path.parent)
-        # Explicit user locations must be searched before broad runtime/home
-        # directories. Otherwise a low scan limit can be exhausted by cached
-        # files before the configured OMML dependency directory is reached.
+        # 优先搜索用户明确指定的位置，避免运行缓存和用户目录耗尽 OMML 扫描预算。
         configured = str(settings.get("ommlSearchPaths") or "")
         for raw in re.split(r"[\n,;]", configured):
             value = raw.strip()
@@ -8439,7 +8434,7 @@ class TaskProcessor:
         return unique
 
     def _copy_omml_dependency(self, source: Path, document_path: Path, item: OmmlDependencyItem, strategy: str) -> None:
-        """Copy one OMML dependency beside the document using the selected policy."""
+        """按选定策略将 OMML 依赖复制到文档旁。"""
         target_dir = document_path.parent if str(document_path) not in {"", "."} and document_path.exists() else self.store.output_base_dir()
         target_dir.mkdir(parents=True, exist_ok=True)
         target = target_dir / source.name
@@ -8487,17 +8482,17 @@ class TaskProcessor:
 
     @staticmethod
     def _find_direct_omml_file(directory: Path) -> Path | None:
-        """Return a direct OMML dependency file in one directory."""
+        """查找目录中直接存在的 OMML 转换依赖文件。"""
         return _find_direct_omml_file(directory)
 
     @staticmethod
     def _is_omml_dependency_name(file_name: str) -> bool:
-        """Return whether a filename matches the OMML dependency pattern."""
+        """判断文件名是否符合 OMML 转换依赖命名规则。"""
         return _is_omml_dependency_name(file_name)
 
     @staticmethod
     def _unique_target_path(path: Path) -> Path:
-        """Return a unique target path for a dependency copy."""
+        """返回依赖复制的唯一目标路径。"""
         for index in range(1, 1000):
             candidate = path.with_name(f"{path.stem}-{index}{path.suffix}")
             if not candidate.exists():
@@ -8505,7 +8500,7 @@ class TaskProcessor:
         return path.with_name(f"{path.stem}-{new_id('copy')}{path.suffix}")
 
     def _mathpix_pdf_jobs(self, task: dict[str, Any], files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Create Mathpix job records while respecting upload authorization gates."""
+        """遵守上传授权门禁创建 Mathpix 作业记录。"""
         settings = self.store.get_settings()
         ocr_settings = self._ocr_settings_snapshot(settings)
         jobs: list[dict[str, Any]] = []
@@ -8620,7 +8615,7 @@ class TaskProcessor:
 
     @staticmethod
     def _is_local_text_pdf(file: dict[str, Any]) -> bool:
-        """Return whether a PDF can use the local text-layer conversion path."""
+        """判断 PDF 是否可走本地文本层转换。"""
         summary = file.get("content_summary") if isinstance(file.get("content_summary"), dict) else {}
         return bool(
             file.get("file_type") == "PDF"
@@ -8635,7 +8630,7 @@ class TaskProcessor:
     def _local_pdf_text_artifacts(
         self, task: dict[str, Any], files: list[dict[str, Any]]
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Convert safe text-layer PDFs locally and return artifacts plus audit evidence."""
+        """本地转换安全的文本层 PDF，返回产物与审计证据。"""
         artifacts: list[dict[str, Any]] = []
         evidence: list[dict[str, Any]] = []
         output_dir = self.store.output_task_dir(str(task.get("id") or ""))
@@ -8687,7 +8682,7 @@ class TaskProcessor:
 
     @staticmethod
     def _write_mathpix_result(path: Path, data: bytes, output_type: str) -> dict[str, Any]:
-        """Persist a Mathpix result and return path-free integrity metadata."""
+        """保存 Mathpix 产物并返回不含路径的完整性信息。"""
         if not data:
             raise MathpixApiError(f"Mathpix {output_type} 下载结果为空")
         path.write_bytes(data)
@@ -8708,7 +8703,7 @@ class TaskProcessor:
         }
 
     def _attach_mathpix_recognition_plan(self, job: dict[str, Any], file: dict[str, Any], settings: dict[str, Any], allow_upload: bool, source_available: bool) -> None:
-        """Attach a Mathpix recognition plan to a job without submitting uploads."""
+        """为作业附加 Mathpix 识别计划，不提交上传。"""
         job["recognition_plan"] = self._mathpix_recognition_plan(job, file, settings, allow_upload, source_available)
 
     def _mathpix_recognition_plan(
@@ -8719,7 +8714,7 @@ class TaskProcessor:
         allow_upload: bool,
         source_available: bool,
     ) -> dict[str, Any]:
-        """Describe the Mathpix request, retention plan, and upload gate."""
+        """描述 Mathpix 请求、保留计划和上传门禁。"""
         request = self._mathpix_request_summary(job.get("request_options"))
         ocr_settings = dict(job.get("ocr_settings") or {})
         retention = dict(job.get("retention_plan") or {})
@@ -8817,7 +8812,7 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_wait_source(settings: dict[str, Any], task_options: dict[str, Any]) -> str:
-        """Describe whether Mathpix completion polling came from settings or task options."""
+        """说明 Mathpix 轮询来自设置还是任务选项。"""
         settings_wait = bool(settings.get("waitForMathpix", False))
         task_wait = bool(task_options.get("waitForMathpix", False))
         if settings_wait and task_wait:
@@ -8830,7 +8825,7 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_task_option_audit(task_options: dict[str, Any]) -> dict[str, Any]:
-        """Audit Mathpix task options without treating them as upload authorization."""
+        """审计 Mathpix 任务选项，不将其作为上传授权。"""
         authorization_keys = {
             "allowExternalMathpixUpload",
             "externalUploadAuthorized",
@@ -8862,7 +8857,7 @@ class TaskProcessor:
 
     @staticmethod
     def _formula_review_contract(settings: dict[str, Any]) -> dict[str, Any]:
-        """Describe how Mathpix PDF formulas flow into manual review."""
+        """描述 Mathpix PDF 公式进入手动审阅的流程。"""
         threshold = TaskProcessor._positive_int(settings.get("formulaConfidenceThreshold", 80), 80)
         return {
             "schema_version": "k12.formulaReviewContract.v1",
@@ -8880,7 +8875,7 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_download_failures(job: dict[str, Any]) -> list[dict[str, str]]:
-        """Return failed Mathpix downloads without leaking local output paths."""
+        """返回 Mathpix 失败下载，不泄露输出路径。"""
         failures: list[dict[str, str]] = []
         if job.get("status") == "download_failed":
             failures.append({"type": "docx", "status": "download_failed", "message": str(job.get("message") or "Mathpix DOCX 下载失败")})
@@ -8895,7 +8890,7 @@ class TaskProcessor:
         output_summaries: dict[str, dict[str, Any]],
         download_failures: list[dict[str, str]],
     ) -> dict[str, Any]:
-        """Describe required Mathpix outputs and whether each one is satisfied."""
+        """描述必需的 Mathpix 产物及其满足情况。"""
         required_types = ["docx"]
         if bool(ocr_settings.get("formula_ocr")):
             required_types.append("tex.zip")
@@ -8953,7 +8948,7 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_required_output_status(output_type: str, job: dict[str, Any], has_summary: bool, has_failure: bool) -> str:
-        """Classify one required Mathpix result without reading local paths."""
+        """判断必需 Mathpix 产物状态，不读取本地路径。"""
         if has_failure:
             return "failed"
         if has_summary:
@@ -8971,7 +8966,7 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_output_summaries(value: Any) -> dict[str, dict[str, Any]]:
-        """Return Mathpix output metadata without local filesystem paths."""
+        """返回不含本地文件路径的 Mathpix 产物元数据。"""
         if not isinstance(value, dict):
             return {}
         summaries: dict[str, dict[str, Any]] = {}
@@ -9003,7 +8998,7 @@ class TaskProcessor:
         raw_status: str,
         credential_envs: list[str],
     ) -> dict[str, Any]:
-        """Explain whether a PDF may be uploaded to Mathpix and why."""
+        """说明 PDF 能否上传到 Mathpix 及原因。"""
         blockers: list[str] = []
         if not source_available:
             blockers.append("missing_local_file")
@@ -9050,7 +9045,7 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_recognition_status_label(status: str) -> str:
-        """Translate a Mathpix recognition plan state for UI display."""
+        """将 Mathpix 识别计划状态转为界面标签。"""
         labels = {
             "pending": "待提交",
             "blocked_missing_local_file": "缺少本地文件",
@@ -9067,7 +9062,7 @@ class TaskProcessor:
         return labels.get(status, status or "未知")
 
     def _mathpix_artifacts(self, task: dict[str, Any], files: list[dict[str, Any]], jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Build artifact rows from completed or blocked Mathpix jobs."""
+        """根据完成或阻断的 Mathpix 作业生成产物行。"""
         files_by_id = {file["id"]: file for file in files}
         artifacts: list[dict[str, Any]] = []
         for job in jobs:
@@ -9126,7 +9121,7 @@ class TaskProcessor:
 
     @staticmethod
     def _ocr_settings_snapshot(settings: dict[str, Any]) -> dict[str, Any]:
-        """Snapshot OCR toggles used for Mathpix PDF-to-Word planning."""
+        """保存 Mathpix PDF 转 Word 规划使用的 OCR 开关快照。"""
         return {
             "language": settings.get("ocrLanguage", "中文+英文"),
             "text_ocr": bool(settings.get("enableTextOcr", True)),
@@ -9138,7 +9133,7 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_submit_options(ocr_settings: dict[str, Any]) -> dict[str, Any]:
-        """Build Mathpix submit options for DOCX and optional tex.zip outputs."""
+        """构建 DOCX 和可选 tex.zip 的 Mathpix 提交选项。"""
         conversion_formats = {"docx": True}
         if ocr_settings.get("formula_ocr"):
             conversion_formats["tex.zip"] = True
@@ -9160,7 +9155,7 @@ class TaskProcessor:
 
     @staticmethod
     def _mathpix_retention_plan(task: dict[str, Any], file: dict[str, Any], ocr_settings: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
-        """Plan PDF image, table, and formula retention for Mathpix conversion."""
+        """规划 Mathpix 转换中的 PDF 图片、表格和公式保留。"""
         summary = file.get("content_summary") or {}
         options = task.get("options") or {}
         word_options = options.get("word") or {}
@@ -9191,7 +9186,7 @@ class TaskProcessor:
 
     @staticmethod
     def _summary_count(summary: dict[str, Any], key: str) -> int:
-        """Read a non-negative count from a content summary."""
+        """从内容摘要读取非负计数。"""
         try:
             return max(0, int(summary.get(key, 0) or 0))
         except (TypeError, ValueError):
@@ -9199,14 +9194,14 @@ class TaskProcessor:
 
     @staticmethod
     def _retention_status(count: int, enabled: bool, enabled_label: str, disabled_label: str, empty_label: str) -> str:
-        """Return the retention status label for one detected object type."""
+        """返回检测到的对象类型的保留状态标签。"""
         if count <= 0:
             return empty_label
         return enabled_label if enabled else disabled_label
 
     @staticmethod
     def _mathpix_retention_notes(plan: dict[str, Any]) -> list[str]:
-        """Build explanatory retention notes for Mathpix PDF conversion."""
+        """生成 Mathpix PDF 转换的保留说明。"""
         notes: list[str] = []
         if plan.get("image_objects"):
             notes.append("DOCX 输出计划保留 PDF 图片对象" if plan.get("retain_images") else "图片对象已检测，但当前保留图片关闭")
@@ -9222,7 +9217,7 @@ class TaskProcessor:
         return notes
 
     def _mathpix_formula_items(self, files: list[dict[str, Any]], jobs: list[dict[str, Any]], task: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        """Extract PDF formula review items from downloaded Mathpix tex.zip files."""
+        """从下载的 Mathpix tex.zip 提取 PDF 公式审阅项。"""
         files_by_id = {file["id"]: file for file in files}
         settings = self.store.get_settings()
         task_context = task or {"task_type": "pdf_to_word", "options": {}}
@@ -9299,7 +9294,7 @@ class TaskProcessor:
 
     @staticmethod
     def _extract_latex_expressions(text: str) -> list[str]:
-        """Extract likely LaTeX formula snippets from Mathpix text outputs."""
+        """从 Mathpix 文本产物提取可能的 LaTeX 公式片段。"""
         formulas: list[str] = []
         patterns = [
             r"\$\$(.*?)\$\$",
@@ -9330,7 +9325,7 @@ class TaskProcessor:
 
     @staticmethod
     def _clean_latex_candidate(value: str) -> str:
-        """Normalize one possible LaTeX formula snippet."""
+        """规范候选 LaTeX 公式片段。"""
         text = re.sub(r"(?m)^\s*%.*$", "", value).strip()
         text = re.sub(r"\\begin\{(?:equation|align|gather|multline)\*?\}", "", text)
         text = re.sub(r"\\end\{(?:equation|align|gather|multline)\*?\}", "", text)
@@ -9340,7 +9335,7 @@ class TaskProcessor:
         return re.sub(r"\s+", " ", text)[:1000]
 
     def _conversion_artifacts(self, task: dict[str, Any], files: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Create conversion artifact records for supported local-first formats."""
+        """为支持的本地优先格式创建转换产物记录。"""
         artifacts: list[dict[str, Any]] = []
         output_dir = self.store.output_task_dir(task["id"])
         for file in files:
@@ -9376,7 +9371,7 @@ class TaskProcessor:
         return artifacts
 
     def _artifact_pending_local_office(self, task: dict[str, Any], file: dict[str, Any]) -> dict[str, Any]:
-        """Build a neutral artifact row for legacy Office input awaiting native execution."""
+        """为等待原生执行的旧 Office 输入生成待处理产物行。"""
         output_types = {
             "word_to_ppt": "pptx",
             "ppt_to_word": "docx",
@@ -9401,7 +9396,7 @@ class TaskProcessor:
         }
 
     def _word_to_ppt_artifact(self, task: dict[str, Any], file: dict[str, Any], source: Path, output_dir: Path) -> dict[str, Any]:
-        """Build a Word-to-PPT artifact and object preservation summary."""
+        """生成 Word 转 PPT 产物和对象保留摘要。"""
         try:
             blocks = extract_docx_blocks(source)
             object_summary = extract_docx_object_summary(source)
@@ -9426,7 +9421,7 @@ class TaskProcessor:
             return self._artifact_error(task, file, "conversion_failed", str(exc))
 
     def _word_to_ppt_object_preservation(self, task: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
-        """Summarize Word object preservation needs without native Office writeback."""
+        """汇总 Word 对象保留需求，不执行原生 Office 写回。"""
         settings = self._conversion_settings_snapshot(task, "word_to_ppt")
         retain_images = bool(settings.get("retain_images", True))
         retain_tables = bool(settings.get("retain_tables", True))
@@ -9469,7 +9464,7 @@ class TaskProcessor:
         }
 
     def _ppt_to_word_artifact(self, task: dict[str, Any], file: dict[str, Any], source: Path, output_dir: Path) -> dict[str, Any]:
-        """Build a PPT-to-Word artifact from extracted slide structure."""
+        """根据提取的幻灯片结构生成 PPT 转 Word 产物。"""
         try:
             slides = extract_pptx_slides(source)
             target, existing_target, _strategy = self._conversion_output_target(output_dir, file["file_name"], ".docx")
@@ -9498,7 +9493,7 @@ class TaskProcessor:
             return self._artifact_error(task, file, "conversion_failed", str(exc))
 
     def _excel_to_pdf_artifacts(self, task: dict[str, Any], file: dict[str, Any], source: Path, output_dir: Path) -> list[dict[str, Any]]:
-        """Build PDF artifacts for Excel sheets or selected ranges."""
+        """为 Excel 工作表或所选范围生成 PDF 产物。"""
         try:
             sheets = self._excel_sheets_for_conversion(extract_xlsx_sheets(source), task)
             artifacts: list[dict[str, Any]] = []
@@ -9515,7 +9510,7 @@ class TaskProcessor:
             return [self._artifact_error(task, file, "conversion_failed", str(exc))]
 
     def _excel_to_word_artifacts(self, task: dict[str, Any], file: dict[str, Any], source: Path, output_dir: Path) -> list[dict[str, Any]]:
-        """Build Word artifacts for Excel sheets or selected ranges."""
+        """为 Excel 工作表或所选范围生成 Word 产物。"""
         try:
             sheets = self._excel_sheets_for_conversion(extract_xlsx_sheets(source), task)
             artifacts: list[dict[str, Any]] = []
@@ -9532,7 +9527,7 @@ class TaskProcessor:
             return [self._artifact_error(task, file, "conversion_failed", str(exc))]
 
     def _excel_to_ppt_artifacts(self, task: dict[str, Any], file: dict[str, Any], source: Path, output_dir: Path) -> list[dict[str, Any]]:
-        """Build PPT artifacts for Excel sheets or selected ranges."""
+        """为 Excel 工作表或所选范围生成 PPT 产物。"""
         try:
             sheets = self._excel_sheets_for_conversion(extract_xlsx_sheets(source), task)
             artifacts: list[dict[str, Any]] = []
@@ -9548,7 +9543,7 @@ class TaskProcessor:
             return [self._artifact_error(task, file, "conversion_failed", str(exc))]
 
     def _conversion_output_target(self, output_dir: Path, file_name: str, suffix: str) -> tuple[Path | None, Path, str]:
-        """Resolve a conversion output path according to conflict policy."""
+        """按冲突策略解析转换输出路径。"""
         target = output_dir / f"{Path(file_name).stem or 'output'}{suffix}"
         strategy = str(self.store.get_settings().get("outputConflictStrategy", "自动重命名") or "自动重命名")
         if strategy not in {"自动重命名", "跳过", "覆盖"}:
@@ -9560,7 +9555,7 @@ class TaskProcessor:
         return self._unique_target_path(target), target, strategy
 
     def _excel_output_groups(self, task: dict[str, Any], file_name: str, sheets: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]], str]]:
-        """Group Excel sheets into one or many conversion outputs."""
+        """将 Excel 工作表分组为一个或多个转换产物。"""
         if not self._excel_split_sheets(task) or len(sheets) <= 1:
             return [(file_name, sheets, "")]
         groups: list[tuple[str, list[dict[str, Any]], str]] = []
@@ -9573,7 +9568,7 @@ class TaskProcessor:
         return groups
 
     def _excel_split_sheets(self, task: dict[str, Any]) -> bool:
-        """Return whether Excel conversion should split sheets into separate outputs."""
+        """判断是否将 Excel 工作表拆为单独产物。"""
         settings = self.store.get_settings()
         excel_options = dict(task.get("options", {}).get("excel") or {})
         if "splitSheets" in excel_options:
@@ -9583,7 +9578,7 @@ class TaskProcessor:
         return bool(settings.get("excelSplitSheets", False))
 
     def _excel_sheets_for_conversion(self, sheets: list[dict[str, Any]], task: dict[str, Any]) -> list[dict[str, Any]]:
-        """Filter and annotate Excel sheets for the requested conversion range."""
+        """按转换范围筛选并标注 Excel 工作表。"""
         settings = self.store.get_settings()
         excel_options = dict(task.get("options", {}).get("excel") or {})
         range_mode = str(excel_options.get("conversionRange") or settings.get("excelConversionRange", "全部工作表") or "全部工作表")
@@ -9612,7 +9607,7 @@ class TaskProcessor:
 
     @staticmethod
     def _excel_formula_mode(options: dict[str, Any], settings: dict[str, Any]) -> str:
-        """Resolve whether Excel formulas or calculated results should be kept."""
+        """确定保留 Excel 公式还是计算结果。"""
         if "retainFormulas" in options:
             return "保留公式" if bool(options.get("retainFormulas")) else "仅保留计算结果"
         mode = str(options.get("formulaMode") or options.get("excelFormulaMode") or settings.get("excelFormulaMode", "保留公式") or "保留公式")
@@ -9620,7 +9615,7 @@ class TaskProcessor:
 
     @staticmethod
     def _excel_selected_sheet_names(options: dict[str, Any]) -> set[str]:
-        """Parse selected Excel sheet names from task options."""
+        """从任务选项解析选中的工作表名称。"""
         raw = options.get("sheetNames") or options.get("selectedSheets") or []
         if isinstance(raw, str):
             values = re.split(r"[,，;；\n]+", raw)
@@ -9632,7 +9627,7 @@ class TaskProcessor:
 
     @staticmethod
     def _excel_selected_sheet_indexes(options: dict[str, Any]) -> set[int]:
-        """Parse selected Excel sheet indexes from task options."""
+        """从任务选项解析选中的工作表序号。"""
         raw = options.get("sheetIndexes") or options.get("selectedSheetIndexes") or []
         if isinstance(raw, str):
             values = re.split(r"[,，;；\n]+", raw)
@@ -9652,7 +9647,7 @@ class TaskProcessor:
 
     @staticmethod
     def _excel_selection_sheet(sheet: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
-        """Return a sheet copy limited to selected cells or a safe preview range."""
+        """返回限制在选中单元格或安全预览范围内的工作表副本。"""
         selected = dict(sheet)
         cells = list(selected.get("cells", []))
         cell_refs = options.get("cellRefs") or options.get("selectedCells") or []
@@ -9676,7 +9671,7 @@ class TaskProcessor:
 
     @staticmethod
     def _excel_sheet_with_range(sheet: dict[str, Any], label: str, formula_mode: str) -> dict[str, Any]:
-        """Attach conversion range and formula mode to one Excel sheet."""
+        """为工作表附加转换范围和公式模式。"""
         selected = dict(sheet)
         selected["conversion_range"] = selected.get("conversion_range") or label
         selected["formula_mode"] = formula_mode
@@ -9686,14 +9681,14 @@ class TaskProcessor:
 
     @staticmethod
     def _excel_cell_result_only(cell: dict[str, Any]) -> dict[str, Any]:
-        """Return an Excel cell copy with formulas replaced by stored results."""
+        """返回以已存结果替代公式的单元格副本。"""
         converted = dict(cell)
         if converted.get("formula"):
             converted["value"] = converted.get("result") or "计算结果未保存"
         return converted
 
     def _conversion_settings_snapshot(self, task: dict[str, Any], task_type: str) -> dict[str, Any]:
-        """Snapshot conversion settings used to produce an artifact."""
+        """保存生成产物所用的转换设置快照。"""
         settings = self.store.get_settings()
         word_options = dict(task.get("options", {}).get("word") or {})
         ppt_options = dict(task.get("options", {}).get("ppt") or {})
@@ -9738,7 +9733,7 @@ class TaskProcessor:
         message: str,
         conversion_settings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Build a successful conversion artifact row."""
+        """生成成功转换产物行。"""
         validation_error = self._output_artifact_validation_error(target, output_type)
         if validation_error:
             try:
@@ -9768,7 +9763,7 @@ class TaskProcessor:
 
     @staticmethod
     def _output_artifact_validation_error(target: Path, output_type: str) -> str:
-        """Return a user-facing error when a generated output cannot be opened safely."""
+        """生成产物无法安全打开时返回用户可见错误。"""
         if not target.exists() or not target.is_file():
             return "转换输出不存在，已标记任务失败"
         try:
@@ -9831,7 +9826,7 @@ class TaskProcessor:
         message: str,
         conversion_settings: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Build a skipped conversion artifact row."""
+        """生成跳过的转换产物行。"""
         return {
             "file_id": file["id"],
             "task_id": task["id"],
@@ -9847,7 +9842,7 @@ class TaskProcessor:
         }
 
     def _artifact_error(self, task: dict[str, Any], file: dict[str, Any], status: str, message: str) -> dict[str, Any]:
-        """Build a failed conversion artifact row."""
+        """生成失败转换产物行。"""
         return {
             "file_id": file["id"],
             "task_id": task["id"],
@@ -9863,7 +9858,7 @@ class TaskProcessor:
         }
 
     def _formula_items(self, file: dict[str, Any], seed: int, task: dict[str, Any]) -> list[dict[str, Any]]:
-        """Build formula report items with MathType fallback metadata."""
+        """生成含 MathType 兜底信息的公式报告项。"""
         settings = self.store.get_settings()
         threshold = self._positive_int(settings.get("formulaConfidenceThreshold", 80), 80)
         formatting_enabled = self._mathtype_formatting_enabled(task, settings)
@@ -9912,7 +9907,7 @@ class TaskProcessor:
         return items
 
     def _image_formula_fallback_items(self, file: dict[str, Any], images: list[dict[str, Any]], task: dict[str, Any]) -> list[dict[str, Any]]:
-        """Build fallback formula items from formula-like small images."""
+        """根据疑似公式的小图片生成公式兜底项。"""
         settings = self.store.get_settings()
         formatting_enabled = self._mathtype_formatting_enabled(task, settings)
         format_scope = self._formula_format_scope(task, settings)
@@ -9961,7 +9956,7 @@ class TaskProcessor:
 
     @staticmethod
     def _formula_format_scope(task: dict[str, Any], settings: dict[str, Any]) -> str:
-        """Resolve the requested MathType formatting scope."""
+        """解析请求的 MathType 格式化范围。"""
         options = task.get("options") or {}
         nested = options.get("formula") if isinstance(options.get("formula"), dict) else {}
         value = (
@@ -9978,12 +9973,12 @@ class TaskProcessor:
 
     @staticmethod
     def _latex_to_mathml_preview(latex: str) -> str:
-        """Build a safe MathML preview wrapper for LaTeX text."""
+        """为 LaTeX 文本生成安全的 MathML 预览包装。"""
         return f"<math><mtext>{html.escape(str(latex or ''))}</mtext></math>"
 
     @staticmethod
     def _mathtype_formatting_enabled(task: dict[str, Any], settings: dict[str, Any]) -> bool:
-        """Resolve whether MathType formatting is enabled for the task."""
+        """判断任务是否启用 MathType 格式化。"""
         options = task.get("options") or {}
         if "enableMathTypeFormatting" in options:
             return bool(options.get("enableMathTypeFormatting"))
@@ -9993,7 +9988,7 @@ class TaskProcessor:
 
     @staticmethod
     def _apply_formula_format_policy(item: dict[str, Any], task: dict[str, Any], formatting_enabled: bool) -> None:
-        """Attach formula formatting status while preserving original formulas."""
+        """附加公式格式化状态，同时保留原始公式。"""
         task_type = str(task.get("task_type") or "")
         is_format_task = task_type == "mathtype_format"
         original_ref = item.get("original_image_ref") or item.get("original_image_path") or ""
@@ -10043,7 +10038,7 @@ class TaskProcessor:
 
     @staticmethod
     def _formula_format_comparison(item: dict[str, Any], settings: dict[str, Any]) -> dict[str, Any]:
-        """Build a before/after formula formatting comparison summary."""
+        """生成公式格式化前后对比摘要。"""
         before = {
             "format": item.get("source_type", "未知"),
             "font": "保留原文",
@@ -10076,7 +10071,7 @@ class TaskProcessor:
         }
 
     def _macro_items(self, file: dict[str, Any], task: dict[str, Any], batch_allowed: bool = True) -> list[dict[str, Any]]:
-        """Build ordered macro queue items without executing Word macros."""
+        """生成有序宏队列，不执行 Word 宏。"""
         options = task.get("options", {})
         settings = self.store.get_settings()
         selected = self._selected_macro_specs(options)
@@ -10142,7 +10137,7 @@ class TaskProcessor:
         return items
 
     def _selected_macro_specs(self, options: dict[str, Any]) -> list[dict[str, Any]]:
-        """Parse selected macro ids and execution order from task options."""
+        """从任务选项解析选中宏标识与执行顺序。"""
         raw = options.get("selectedMacros") or options.get("macroSequence") or []
         specs: list[dict[str, Any]] = []
         if isinstance(raw, list):
@@ -10154,7 +10149,7 @@ class TaskProcessor:
         return specs
 
     def _macro_from_freeform(self, spec: dict[str, Any], order: int) -> dict[str, Any]:
-        """Build a macro item from a user-provided macro specification."""
+        """根据用户提供的宏规格生成队列项。"""
         macro = MacroItem(
             str(spec.get("macro_name") or spec.get("name") or "UserProvidedMacro"),
             str(spec.get("macro_source") or spec.get("source") or "用户选择"),
@@ -10175,7 +10170,7 @@ class TaskProcessor:
         whitelist_only: bool = False,
         whitelist: set[str] | None = None,
     ) -> str:
-        """Classify a macro queue item status without running VBA."""
+        """判断宏队列项状态，不运行 VBA。"""
         if not selected:
             return "待选择"
         if not macro_execution_enabled:
@@ -10196,13 +10191,13 @@ class TaskProcessor:
 
     @staticmethod
     def _macro_whitelist(value: Any) -> set[str]:
-        """Parse the configured macro whitelist into normalized tokens."""
+        """将宏白名单解析为规范标记。"""
         tokens = re.split(r"[\s,，;；]+", str(value or ""))
         return {token.strip().lower() for token in tokens if token.strip()}
 
     @staticmethod
     def _macro_allowed(macro: dict[str, Any], whitelist: set[str]) -> bool:
-        """Return whether a macro id or name is whitelisted."""
+        """判断宏标识或名称是否在白名单内。"""
         if not whitelist:
             return False
         candidates = {
@@ -10213,7 +10208,7 @@ class TaskProcessor:
 
     @staticmethod
     def _macro_source_allowed(macro: dict[str, Any], settings: dict[str, Any]) -> bool:
-        """Return whether settings allow a macro source category."""
+        """判断设置是否允许指定宏来源。"""
         source = str(macro.get("macro_source") or "").lower()
         if "本地宏库" in source or "local" in source:
             return bool(settings.get("allowLocalMacroLibrary", True))
@@ -10225,7 +10220,7 @@ class TaskProcessor:
 
     @staticmethod
     def _macro_failure_policy(strategy: str) -> dict[str, Any]:
-        """Return the queue behavior for a macro failure strategy."""
+        """返回宏失败策略对应的队列处理行为。"""
         normalized = str(strategy or "跳过").strip()
         policies = {
             "停止": {
@@ -10264,7 +10259,7 @@ class TaskProcessor:
         return policies.get(normalized, policies["跳过"])
 
     def _create_macro_backup(self, file: dict[str, Any], task_id: str) -> str:
-        """Create a managed source backup before macro handoff when possible."""
+        """在宏交接前尽可能创建受管源文件备份。"""
         source = self._original_source_path(file)
         if not source.exists() or not source.is_file():
             return ""
@@ -10276,7 +10271,7 @@ class TaskProcessor:
 
     @staticmethod
     def _original_source_path(file: dict[str, Any]) -> Path:
-        """Return the original document path for file actions that must not target snapshots."""
+        """为不应操作快照的文件动作返回原始文档路径。"""
         return Path(
             str(
                 file.get("original_storage_path")
@@ -10288,7 +10283,7 @@ class TaskProcessor:
         )
 
     def _small_image_items(self, file: dict[str, Any], task: dict[str, Any], seed: int, errors: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-        """Extract small-image report items from supported source files."""
+        """从支持的源文件提取小图片报告项。"""
         path = Path(file.get("storage_path") or file.get("file_path") or "")
         if not path.exists() or not path.is_file():
             has_source_path = bool(file.get("storage_path") or file.get("file_path"))
@@ -10306,7 +10301,7 @@ class TaskProcessor:
         return []
 
     def _extract_ooxml_small_images(self, file: dict[str, Any], task: dict[str, Any], path: Path, errors: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
-        """Extract small images from OOXML media parts."""
+        """从 OOXML 媒体部件提取小图片。"""
         prefix = OOXML_IMAGE_PREFIXES.get(file.get("file_type"))
         if not prefix:
             return []
@@ -10342,7 +10337,7 @@ class TaskProcessor:
         seen_hashes: set[str] | None = None,
         errors: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any] | None:
-        """Build one small-image item from image bytes when it meets thresholds."""
+        """图片字节满足阈值时生成小图片项。"""
         dimensions = self._image_dimensions(data)
         if not dimensions:
             if errors is not None:
@@ -10405,7 +10400,7 @@ class TaskProcessor:
         return payload
 
     def _pdf_small_image_items(self, file: dict[str, Any], task: dict[str, Any], path: Path, seed: int) -> list[dict[str, Any]]:
-        """Extract small-image items from PDF image descriptors."""
+        """从 PDF 图片描述中提取小图片项。"""
         try:
             descriptors = _pdf_image_descriptors(path.read_bytes()[:20_000_000])
         except OSError:
@@ -10478,7 +10473,7 @@ class TaskProcessor:
         return items or self._pdf_image_placeholders(file, seed)
 
     def _pdf_image_placeholders(self, file: dict[str, Any], seed: int) -> list[dict[str, Any]]:
-        """Build PDF image placeholder rows when raw streams are unavailable."""
+        """原始流不可用时生成 PDF 图片占位行。"""
         image_count = int(file.get("content_summary", {}).get("imageObjects", 0) or 0)
         items: list[dict[str, Any]] = []
         for index in range(min(image_count, 12)):
@@ -10506,7 +10501,7 @@ class TaskProcessor:
 
     @staticmethod
     def _image_extraction_error(file: dict[str, Any], source_name: str, message: str, recommendation: str) -> dict[str, Any]:
-        """Build a small-image extraction error row."""
+        """生成小图片提取错误行。"""
         return {
             "id": new_id("imgerr"),
             "file_id": file.get("id", ""),
@@ -10527,7 +10522,7 @@ class TaskProcessor:
         image_type: str,
         seen_hashes: set[str] | None = None,
     ) -> dict[str, Any]:
-        """Return heuristic flags for small-image filtering and deduplication."""
+        """返回小图片筛选和去重的启发式标记。"""
         text = f"{source_name} {location}".lower()
         try:
             digest = hashlib.sha256(data).hexdigest()
@@ -10554,12 +10549,12 @@ class TaskProcessor:
 
     @staticmethod
     def _png_has_alpha(data: bytes) -> bool:
-        """Return whether PNG header bytes indicate an alpha channel."""
+        """判断 PNG 头是否表明存在透明通道。"""
         return data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) > 25 and data[25] in {4, 6}
 
     @staticmethod
     def _image_dimensions(data: bytes) -> tuple[int, int, str] | None:
-        """Read image dimensions from common header bytes."""
+        """从常见图片头读取宽高。"""
         if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
             return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"), "png"
         if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
@@ -10572,7 +10567,7 @@ class TaskProcessor:
 
     @staticmethod
     def _jpeg_dimensions(data: bytes) -> tuple[int, int, str] | None:
-        """Read JPEG dimensions from SOF markers."""
+        """从 SOF 标记读取 JPEG 宽高。"""
         index = 2
         while index + 9 < len(data):
             if data[index] != 0xFF:
@@ -10591,7 +10586,7 @@ class TaskProcessor:
 
     @staticmethod
     def _image_heuristic_label(source_name: str, width: int, height: int, data: bytes) -> dict[str, Any]:
-        """Classify a small image as icon, formula, stamp, signature, or QR-like."""
+        """将小图片分类为图标、公式、印章、签名或疑似二维码。"""
         name = source_name.lower()
         aspect = width / max(height, 1)
         if "qr" in name or (abs(width - height) <= 8 and len(data) > 1500):

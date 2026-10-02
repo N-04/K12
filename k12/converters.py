@@ -1,10 +1,4 @@
-"""Standard-library document extraction and lightweight conversion helpers.
-
-These helpers support the PRD's local-first baseline without pretending to be a
-full Office rendering engine. They extract enough structure for previews,
-reports, and minimal OOXML conversion artifacts while leaving high-fidelity
-Office, MathType, OMML writeback, and macro work to the local client contracts.
-"""
+"""使用标准库提取文档结构并提供轻量转换。支持本地优先的基础功能，为预览、报告和最小 OOXML 产物提取结构；完整 Office 渲染、MathType、OMML 写回和宏处理交由本地客户端执行。"""
 
 from __future__ import annotations
 
@@ -24,7 +18,7 @@ PDF_TEXT_STREAM_COUNT_LIMIT = 1000
 
 
 def extract_docx_blocks(path: Path) -> list[dict[str, Any]]:
-    """Extract visible DOCX paragraph blocks for previews and Word-to-PPT."""
+    """提取 DOCX 可见段落，用于预览和 Word 转 PPT。"""
     with zipfile.ZipFile(path) as archive:
         document_xml = archive.read("word/document.xml").decode("utf-8", errors="ignore")
     paragraphs = re.findall(r"<w:p[\s\S]*?</w:p>", document_xml)
@@ -41,7 +35,7 @@ def extract_docx_blocks(path: Path) -> list[dict[str, Any]]:
 
 
 def extract_docx_object_summary(path: Path) -> dict[str, Any]:
-    """Count DOCX objects that must be preserved or handed to the desktop side."""
+    """统计 DOCX 中需要保留或交接桌面端的对象。"""
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
         try:
@@ -69,7 +63,7 @@ def extract_docx_object_summary(path: Path) -> dict[str, Any]:
 
 
 def extract_pptx_slides(path: Path) -> list[dict[str, Any]]:
-    """Extract PPTX slide text, notes, and object counts for conversion reports."""
+    """提取 PPTX 的文本、备注与对象数量，用于转换报告。"""
     with zipfile.ZipFile(path) as archive:
         names = sorted(
             [name for name in archive.namelist() if name.startswith("ppt/slides/slide") and name.endswith(".xml")],
@@ -102,7 +96,7 @@ def extract_pptx_slides(path: Path) -> list[dict[str, Any]]:
 
 
 def extract_xlsx_sheets(path: Path) -> list[dict[str, Any]]:
-    """Extract worksheet previews and formula counts from an XLSX workbook."""
+    """提取 XLSX 工作表预览与公式数量。"""
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
         shared_strings = _xlsx_shared_strings(archive)
@@ -152,7 +146,7 @@ def build_pptx_from_docx(
     generate_toc: bool = False,
     object_preservation: dict[str, Any] | None = None,
 ) -> None:
-    """Create a lightweight PPTX from DOCX blocks and preservation metadata."""
+    """根据 DOCX 段落及对象保留信息生成轻量 PPTX。"""
     slide_limit = max_chars if auto_pagination else 1_000_000
     slides = _slides_from_blocks(blocks, slide_limit)
     if generate_toc and slides:
@@ -174,7 +168,7 @@ def build_docx_from_slides(
     retain_images: bool = True,
     retain_formulas: bool = True,
 ) -> None:
-    """Create a lightweight DOCX handout from extracted PPT slide structure."""
+    """根据提取的幻灯片结构生成轻量 DOCX 讲义。"""
     paragraphs: list[dict[str, Any]] = []
     if mode:
         paragraphs.append({"text": f"PPT 转 Word 模式：{mode}", "style": "Heading1"})
@@ -216,7 +210,7 @@ def build_docx_from_slides(
 
 
 def extract_pdf_text_blocks(path: Path) -> list[dict[str, Any]]:
-    """Extract text-showing operands from plain or Flate-compressed PDF streams."""
+    """从普通或 Flate 压缩的 PDF 内容流中提取文本操作数。"""
     if path.stat().st_size > PDF_TEXT_SOURCE_LIMIT_BYTES:
         return []
     data = path.read_bytes()
@@ -262,7 +256,7 @@ def extract_pdf_text_blocks(path: Path) -> list[dict[str, Any]]:
 
 
 def build_docx_from_pdf_text(path: Path, target: Path, title: str = "") -> dict[str, Any]:
-    """Create a DOCX from an extractable PDF text layer and return conversion evidence."""
+    """将可提取的 PDF 文本层转为 DOCX，并返回转换证据。"""
     blocks = extract_pdf_text_blocks(path)
     if not blocks:
         raise ValueError("PDF 文本层未提取到可写入内容")
@@ -272,7 +266,7 @@ def build_docx_from_pdf_text(path: Path, target: Path, title: str = "") -> dict[
 
 
 def build_pdf_from_xlsx(sheets: list[dict[str, Any]], target: Path, title: str) -> None:
-    """Write a text PDF summary for an Excel-to-PDF conversion artifact."""
+    """将 Excel 工作表摘要写为文本 PDF。"""
     lines = [f"Excel to PDF: {title}", ""]
     for sheet in sheets:
         lines.append(f"Sheet {sheet.get('index')}: {sheet.get('name')}")
@@ -299,7 +293,7 @@ def build_pdf_from_xlsx(sheets: list[dict[str, Any]], target: Path, title: str) 
 
 
 def build_docx_from_xlsx(sheets: list[dict[str, Any]], target: Path, title: str) -> None:
-    """Write an Excel-to-Word DOCX summary from normalized sheet previews."""
+    """将规范化的 Excel 工作表预览写为 DOCX 摘要。"""
     paragraphs = [{"text": f"Excel 表格提取：{title}", "style": "Heading1"}]
     for sheet in sheets:
         paragraphs.append({"text": f"Sheet {sheet.get('index')}: {sheet.get('name')}", "style": "Heading1"})
@@ -325,7 +319,7 @@ def build_docx_from_xlsx(sheets: list[dict[str, Any]], target: Path, title: str)
 
 
 def build_pptx_from_xlsx(sheets: list[dict[str, Any]], target: Path, title: str) -> None:
-    """Write an Excel-to-PPTX summary deck from normalized sheet previews."""
+    """将规范化的 Excel 工作表预览写为 PPTX 摘要。"""
     slides: list[dict[str, Any]] = []
     for sheet in sheets:
         body = [
@@ -344,7 +338,7 @@ def build_pptx_from_xlsx(sheets: list[dict[str, Any]], target: Path, title: str)
 
 
 def build_text_pdf(lines: list[str], target: Path, title: str = "K12 Export") -> None:
-    """Build a small standards-compatible PDF from plain text lines."""
+    """根据纯文本行生成符合基本规范的小型 PDF。"""
     target.parent.mkdir(parents=True, exist_ok=True)
     pages = _pdf_pages(lines or [title], 42)
     objects: list[bytes] = []
@@ -365,7 +359,7 @@ def build_text_pdf(lines: list[str], target: Path, title: str = "K12 Export") ->
 
 
 def build_docx(paragraphs: list[dict[str, Any]], target: Path) -> None:
-    """Package paragraphs into a minimal DOCX artifact for downloads."""
+    """将段落打包为可下载的最小 DOCX。"""
     target.parent.mkdir(parents=True, exist_ok=True)
     body = "".join(_docx_paragraph(item["text"], item.get("style", "Normal")) for item in paragraphs)
     document = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -377,7 +371,7 @@ def build_docx(paragraphs: list[dict[str, Any]], target: Path) -> None:
 
 
 def build_pptx(slides: list[dict[str, Any]], target: Path) -> None:
-    """Package slide dictionaries into a minimal PPTX artifact for downloads."""
+    """将幻灯片数据打包为可下载的最小 PPTX。"""
     target.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("[Content_Types].xml", _pptx_content_types(len(slides)))
@@ -389,7 +383,7 @@ def build_pptx(slides: list[dict[str, Any]], target: Path) -> None:
 
 
 def _slides_from_blocks(blocks: list[dict[str, Any]], max_chars: int) -> list[dict[str, Any]]:
-    """Group DOCX blocks into lightweight slides for the baseline PPTX artifact."""
+    """将 DOCX 段落分组为基础 PPTX 幻灯片。"""
     slides: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
     for block in blocks:
@@ -411,7 +405,7 @@ def _slides_from_blocks(blocks: list[dict[str, Any]], max_chars: int) -> list[di
 
 
 def _docx_object_preservation_lines(plan: dict[str, Any]) -> list[str]:
-    """Format DOCX object-preservation evidence without performing native writeback."""
+    """格式化 DOCX 对象保留证据，不执行原生写回。"""
     source = plan.get("source") or {}
     statuses = plan.get("statuses") or {}
     object_total = sum(int(source.get(key, 0) or 0) for key in ("images", "tables", "formulas"))
@@ -430,13 +424,13 @@ def _docx_object_preservation_lines(plan: dict[str, Any]) -> list[str]:
 
 
 def _extract_text(xml: str, tag: str) -> str:
-    """Extract and clean concatenated text nodes for one XML tag."""
+    """提取指定 XML 标签的文本并清理内容。"""
     pieces = re.findall(fr"<{tag}[^>]*>([\s\S]*?)</{tag}>", xml)
     return _clean_text("".join(pieces))
 
 
 def _xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
-    """Read XLSX shared strings for lightweight worksheet previews."""
+    """读取 XLSX 共享字符串供工作表预览使用。"""
     try:
         xml = archive.read("xl/sharedStrings.xml").decode("utf-8", errors="ignore")
     except KeyError:
@@ -449,7 +443,7 @@ def _xlsx_shared_strings(archive: zipfile.ZipFile) -> list[str]:
 
 
 def _xlsx_sheet_names(archive: zipfile.ZipFile) -> dict[int, str]:
-    """Read workbook sheet names keyed by worksheet order."""
+    """按工作表顺序读取名称。"""
     try:
         xml = archive.read("xl/workbook.xml").decode("utf-8", errors="ignore")
     except KeyError:
@@ -461,7 +455,7 @@ def _xlsx_sheet_names(archive: zipfile.ZipFile) -> dict[int, str]:
 
 
 def _xlsx_cells(xml: str, shared_strings: list[str]) -> list[dict[str, str]]:
-    """Extract visible cell values and formulas from one worksheet XML part."""
+    """从工作表 XML 提取可见单元格值与公式。"""
     cells: list[dict[str, str]] = []
     for cell in re.findall(r"<c\b[\s\S]*?</c>", xml):
         ref_match = re.search(r'r="([^"]+)"', cell)
@@ -486,7 +480,7 @@ def _xlsx_cells(xml: str, shared_strings: list[str]) -> list[dict[str, str]]:
 
 
 def _pptx_related_parts(archive: zipfile.ZipFile, part_path: str) -> list[str]:
-    """Resolve relationships referenced by a PPTX slide or notes part."""
+    """解析幻灯片或备注部件引用的关联部件。"""
     rels_path = f"{posixpath.dirname(part_path)}/_rels/{posixpath.basename(part_path)}.rels"
     try:
         rels_xml = archive.read(rels_path).decode("utf-8", errors="ignore")
@@ -496,7 +490,7 @@ def _pptx_related_parts(archive: zipfile.ZipFile, part_path: str) -> list[str]:
 
 
 def _pptx_notes(archive: zipfile.ZipFile, related_parts: list[str]) -> list[str]:
-    """Extract speaker notes from related PPTX notes slides."""
+    """从关联的备注幻灯片提取演讲者备注。"""
     notes: list[str] = []
     for part in related_parts:
         if "/notesSlides/" not in f"/{part}":
@@ -510,13 +504,13 @@ def _pptx_notes(archive: zipfile.ZipFile, related_parts: list[str]) -> list[str]
 
 
 def _pptx_texts(xml: str) -> list[str]:
-    """Extract visible DrawingML text runs from PPTX XML."""
+    """提取 PPTX XML 中可见的 DrawingML 文本。"""
     texts = re.findall(r"<a:t\b[^>]*>([\s\S]*?)</a:t>", xml)
     return [_clean_text(item) for item in texts if _clean_text(item)]
 
 
 def _docx_slide_outline(slides: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Convert extracted slide summaries into DOCX outline paragraphs."""
+    """将幻灯片摘要转为 DOCX 大纲段落。"""
     paragraphs: list[dict[str, Any]] = []
     for slide in slides:
         paragraphs.append({"text": slide["title"], "style": "Heading1"})
@@ -531,7 +525,7 @@ def _pptx_slide_summary(
     retain_images: bool = True,
     retain_formulas: bool = True,
 ) -> str:
-    """Summarize PPTX objects for handout output without claiming real rendering."""
+    """汇总讲义所需的 PPTX 对象，不声称完成真实渲染。"""
     parts = [
         ("文本框", slide.get("text_box_count", 0)),
         ("图片", slide.get("image_count", 0) if retain_images else 0),
@@ -545,7 +539,7 @@ def _pptx_slide_summary(
 
 
 def _pptx_formula_count(xml: str) -> int:
-    """Count formula-like PPTX markers, MathType references, and TeX snippets."""
+    """统计 PPTX 公式标记、MathType 引用与 TeX 片段。"""
     math_objects = len(re.findall(r"<(?:\w+:)?oMath(?:Para)?\b", xml))
     mathtype_refs = len(re.findall(r"MathType|Equation Native", xml, flags=re.IGNORECASE))
     latex_refs = len(re.findall(r"\$[^$]{1,120}\$|\\(?:frac|sqrt|sum|int)\b", xml))
@@ -553,7 +547,7 @@ def _pptx_formula_count(xml: str) -> int:
 
 
 def _xlsx_sheet_objects(archive: zipfile.ZipFile, sheet_path: str, sheet_xml: str) -> dict[str, int]:
-    """Count worksheet drawings, charts, images, comments, and table parts."""
+    """统计工作表中的绘图、图表、图片、批注和表格。"""
     rels_path = f"{posixpath.dirname(sheet_path)}/_rels/{posixpath.basename(sheet_path)}.rels"
     try:
         rels_xml = archive.read(rels_path).decode("utf-8", errors="ignore")
@@ -601,24 +595,24 @@ def _xlsx_sheet_objects(archive: zipfile.ZipFile, sheet_path: str, sheet_xml: st
 
 
 def _resolve_xlsx_target(source_path: str, target: str) -> str:
-    """Resolve an OOXML relationship target relative to its source part."""
+    """相对于源部件解析 OOXML 关系目标。"""
     if target.startswith("/"):
         return target.lstrip("/")
     return posixpath.normpath(posixpath.join(posixpath.dirname(source_path), target))
 
 
 def _strip_xml(xml: str) -> str:
-    """Remove XML tags and normalize the remaining text."""
+    """移除 XML 标签并规范剩余文本。"""
     return _clean_text(re.sub(r"<[^>]+>", "", xml))
 
 
 def _clean_text(text: str) -> str:
-    """Collapse whitespace and unescape XML or HTML text entities."""
+    """合并空白并还原 XML 或 HTML 实体。"""
     return html.unescape(re.sub(r"\s+", " ", text)).strip()
 
 
 def _heading_level(paragraph: str, index: int) -> int:
-    """Infer a simple heading level from DOCX style markers."""
+    """根据 DOCX 样式标记推断标题层级。"""
     style_match = re.search(r'w:val="([^"]+)"', paragraph)
     style = style_match.group(1).lower() if style_match else ""
     if "heading1" in style or style in {"title", "1"} or index == 1:
@@ -629,19 +623,19 @@ def _heading_level(paragraph: str, index: int) -> int:
 
 
 def _slide_number(path: str) -> int:
-    """Return the numeric order of a PPTX slide path."""
+    """返回 PPTX 幻灯片路径中的序号。"""
     match = re.search(r"slide(\d+)\.xml$", path)
     return int(match.group(1)) if match else 0
 
 
 def _worksheet_number(path: str) -> int:
-    """Return the numeric order of an XLSX worksheet path."""
+    """返回 XLSX 工作表路径中的序号。"""
     match = re.search(r"sheet(\d+)\.xml$", path)
     return int(match.group(1)) if match else 0
 
 
 def _pdf_pages(lines: list[str], page_size: int) -> list[list[str]]:
-    """Paginate plain text lines for the lightweight PDF writer."""
+    """将文本行分页供轻量 PDF 写入器使用。"""
     pages: list[list[str]] = []
     current: list[str] = []
     for line in lines:
@@ -656,7 +650,7 @@ def _pdf_pages(lines: list[str], page_size: int) -> list[list[str]]:
 
 
 def _pdf_array_strings(value: bytes) -> list[str]:
-    """Decode literal and hexadecimal strings inside one PDF TJ array."""
+    """解码 PDF TJ 数组中的字面量和十六进制字符串。"""
     fragments: list[str] = []
     for match in re.finditer(rb"\((?:\\.|[^\\()])*\)|<([0-9A-Fa-f\s]+)>", value):
         token = match.group(0)
@@ -670,7 +664,7 @@ def _pdf_array_strings(value: bytes) -> list[str]:
 
 
 def _bounded_flate_decode(value: bytes, limit: int) -> bytes | None:
-    """Decode one Flate stream without allowing output beyond the configured limit."""
+    """解码 Flate 流，并限制展开后的数据大小。"""
     decoder = zlib.decompressobj()
     output = decoder.decompress(value, limit + 1)
     if len(output) > limit or decoder.unconsumed_tail:
@@ -683,7 +677,7 @@ def _bounded_flate_decode(value: bytes, limit: int) -> bytes | None:
 
 
 def _pdf_literal_strings(value: bytes) -> list[str]:
-    """Decode balanced PDF literal strings including escapes and octal bytes."""
+    """解码成对括号中的 PDF 字符串，处理转义与八进制字节。"""
     results: list[str] = []
     index = 0
     while index < len(value):
@@ -727,7 +721,7 @@ def _pdf_literal_strings(value: bytes) -> list[str]:
 
 
 def _decode_pdf_hex_string(value: bytes) -> str:
-    """Decode a PDF hexadecimal string with UTF-16 BOM support."""
+    """解码 PDF 十六进制字符串，支持 UTF-16 字节序标记。"""
     compact = re.sub(rb"\s+", b"", value)
     if len(compact) % 2:
         compact += b"0"
@@ -738,7 +732,7 @@ def _decode_pdf_hex_string(value: bytes) -> str:
 
 
 def _decode_pdf_text_bytes(value: bytes) -> str:
-    """Decode common PDF text bytes without requiring an external PDF engine."""
+    """解码常见 PDF 文本字节，无需外部 PDF 引擎。"""
     if value.startswith((b"\xfe\xff", b"\xff\xfe")):
         encoding = "utf-16-be" if value.startswith(b"\xfe\xff") else "utf-16-le"
         return value[2:].decode(encoding, errors="replace").strip()
@@ -749,7 +743,7 @@ def _decode_pdf_text_bytes(value: bytes) -> str:
 
 
 def _pdf_line_chunks(line: str, width: int = 92) -> list[str]:
-    """Wrap one text line into ASCII chunks that fit the PDF page."""
+    """将文本行拆为适合 PDF 页宽的 ASCII 片段。"""
     clean = _pdf_ascii(line)
     if not clean:
         return [""]
@@ -757,18 +751,18 @@ def _pdf_line_chunks(line: str, width: int = 92) -> list[str]:
 
 
 def _pdf_ascii(value: str) -> str:
-    """Convert text to the ASCII subset supported by the simple PDF writer."""
+    """将文本转为简单 PDF 写入器支持的 ASCII 子集。"""
     text = html.unescape(str(value))
     return "".join(char if 32 <= ord(char) <= 126 else "?" for char in text)
 
 
 def _pdf_escape(value: str) -> str:
-    """Escape text for a PDF literal string."""
+    """转义 PDF 字面量字符串。"""
     return value.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
 
 
 def _pdf_stream(lines: list[str]) -> bytes:
-    """Build one PDF content stream from already wrapped ASCII lines."""
+    """根据已换行的 ASCII 文本生成 PDF 内容流。"""
     commands = ["BT", "/F1 11 Tf", "50 792 Td", "14 TL"]
     for index, line in enumerate(lines):
         if index:
@@ -779,7 +773,7 @@ def _pdf_stream(lines: list[str]) -> bytes:
 
 
 def _write_pdf(objects: list[bytes], target: Path) -> None:
-    """Write a minimal PDF file with an xref table."""
+    """写入带交叉引用表的最小 PDF。"""
     offsets: list[int] = []
     content = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
     for index, obj in enumerate(objects, start=1):
@@ -797,25 +791,25 @@ def _write_pdf(objects: list[bytes], target: Path) -> None:
 
 
 def _docx_paragraph(text: str, style: str) -> str:
-    """Render one minimal WordprocessingML paragraph."""
+    """生成最小 WordprocessingML 段落。"""
     style_xml = '<w:pPr><w:pStyle w:val="Heading1"/></w:pPr>' if style == "Heading1" else ""
     return f"<w:p>{style_xml}<w:r><w:t>{html.escape(text)}</w:t></w:r></w:p>"
 
 
 def _docx_content_types() -> str:
-    """Return the DOCX content-types part for a single document part."""
+    """返回单文档部件的 DOCX 内容类型声明。"""
     return """<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"""
 
 
 def _package_rels(target: str) -> str:
-    """Return package relationships XML pointing at the main OOXML part."""
+    """返回指向 OOXML 主部件的包关系 XML。"""
     return f"""<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="{target}"/></Relationships>"""
 
 
 def _pptx_content_types(slide_count: int) -> str:
-    """Return PPTX content-types XML for the requested slide count."""
+    """根据幻灯片数量生成 PPTX 内容类型 XML。"""
     overrides = "".join(
         f'<Override PartName="/ppt/slides/slide{index}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>'
         for index in range(1, slide_count + 1)
@@ -825,14 +819,14 @@ def _pptx_content_types(slide_count: int) -> str:
 
 
 def _presentation_xml(slide_count: int) -> str:
-    """Return the minimal PPTX presentation XML with slide ids."""
+    """返回含幻灯片标识的最小 PPTX 演示文稿 XML。"""
     slide_ids = "".join(f'<p:sldId id="{255 + index}" r:id="rId{index}"/>' for index in range(1, slide_count + 1))
     return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><p:sldIdLst>{slide_ids}</p:sldIdLst><p:sldSz cx="9144000" cy="6858000" type="screen4x3"/></p:presentation>"""
 
 
 def _presentation_rels(slide_count: int) -> str:
-    """Return presentation relationships for all generated slides."""
+    """返回所有生成幻灯片的演示文稿关系。"""
     rels = "".join(
         f'<Relationship Id="rId{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{index}.xml"/>'
         for index in range(1, slide_count + 1)
@@ -842,7 +836,7 @@ def _presentation_rels(slide_count: int) -> str:
 
 
 def _slide_xml(title: str, body: list[str]) -> str:
-    """Render one minimal PPTX slide with title and body text."""
+    """生成含标题和正文的最小 PPTX 幻灯片。"""
     body_text = "\n".join(body) if body else ""
     return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr/><p:grpSpPr/><p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/></p:nvSpPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>{html.escape(title)}</a:t></a:r></a:p></p:txBody></p:sp><p:sp><p:nvSpPr><p:cNvPr id="3" name="Content"/></p:nvSpPr><p:txBody><a:bodyPr/><a:p><a:r><a:t>{html.escape(body_text)}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"""

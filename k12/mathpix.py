@@ -1,9 +1,4 @@
-"""Mathpix PDF OCR client used by K12 PDF-to-Word tasks.
-
-This module only wraps the Mathpix HTTP API. Upload authorization, credential
-checks, and whether a PDF may leave the user's machine are enforced by
-``TaskProcessor`` before this client is constructed.
-"""
+"""封装 Mathpix PDF OCR 的 HTTP 接口。构建客户端前，由 TaskProcessor 检查外部上传授权、凭据及文档是否允许离开本机。"""
 
 from __future__ import annotations
 
@@ -22,24 +17,24 @@ MATHPIX_ERROR_DETAIL_LIMIT = 600
 
 
 class MathpixConfigError(RuntimeError):
-    """Raised when authorized Mathpix credential environment is incomplete."""
+    """已授权的 Mathpix 凭据环境不完整时抛出。"""
 
     code = "mathpix_config_error"
 
 
 class MathpixApiError(RuntimeError):
-    """Raised when the Mathpix HTTP workflow returns an unsafe or failed result."""
+    """Mathpix HTTP 工作流返回不安全或失败结果时抛出。"""
 
     code = "mathpix_api_error"
 
 
 class MathpixClient:
-    """Small standard-library client for Mathpix ``/v3/pdf`` workflows."""
+    """使用标准库实现 Mathpix /v3/pdf 工作流客户端。"""
 
     base_url = "https://api.mathpix.com"
 
     def __init__(self, app_id: str, app_key: str, timeout: int = 30) -> None:
-        """Create a client with already-authorized Mathpix credentials."""
+        """初始化当前对象所需的配置、依赖与运行状态。"""
         if not app_id or not app_key:
             raise MathpixConfigError("Mathpix APP ID 或 APP KEY 未配置")
         self.app_id = app_id
@@ -48,22 +43,22 @@ class MathpixClient:
 
     @classmethod
     def from_environment(cls, app_id_env: str, app_key_env: str) -> "MathpixClient":
-        """Read credentials from named environment variables without logging values."""
+        """读取指定环境变量中的凭据，不记录其值。"""
         return cls(os.getenv(app_id_env, ""), os.getenv(app_key_env, ""))
 
     def submit_pdf(self, pdf_path: Path, options: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Submit one local PDF to Mathpix and return the JSON response."""
+        """向 Mathpix 提交本地 PDF 并返回 JSON 响应。"""
         fields = {"options_json": json.dumps(self._pdf_options(options), ensure_ascii=False)}
         files = {"file": (pdf_path.name, pdf_path.read_bytes(), "application/pdf")}
         return self._request_json("POST", "/v3/pdf", body=self._multipart_body(fields, files))
 
     def get_pdf_status(self, pdf_id: str) -> dict[str, Any]:
-        """Fetch Mathpix processing status for a submitted PDF."""
+        """读取已提交 PDF 的 Mathpix 处理状态。"""
         safe_pdf_id = self._pdf_result_id(pdf_id)
         return self._request_json("GET", f"/v3/pdf/{safe_pdf_id}")
 
     def wait_for_pdf(self, pdf_id: str, timeout_seconds: int = 600, poll_seconds: int = 5) -> dict[str, Any]:
-        """Poll until Mathpix reports a terminal status or the local timeout expires."""
+        """轮询至 Mathpix 终态或本地超时。"""
         deadline = time.time() + timeout_seconds
         latest: dict[str, Any] = {}
         while time.time() < deadline:
@@ -75,13 +70,13 @@ class MathpixClient:
         return latest
 
     def download_pdf_result(self, pdf_id: str, extension: str) -> bytes:
-        """Download a generated Mathpix artifact such as ``docx`` or ``tex.zip``."""
+        """下载 Mathpix 生成的 docx 或 tex.zip 等产物。"""
         safe_pdf_id = self._pdf_result_id(pdf_id)
         safe_extension = self._pdf_result_extension(extension)
         return self._request_bytes("GET", f"/v3/pdf/{safe_pdf_id}.{safe_extension}")
 
     def _request_json(self, method: str, path: str, body: tuple[bytes, str] | None = None) -> dict[str, Any]:
-        """Issue a Mathpix request and decode a JSON response body."""
+        """发起 Mathpix 请求并解码 JSON 响应。"""
         data = self._request_bytes(method, path, body)
         try:
             payload = json.loads(data.decode("utf-8"))
@@ -92,7 +87,7 @@ class MathpixClient:
         return payload
 
     def _request_bytes(self, method: str, path: str, body: tuple[bytes, str] | None = None) -> bytes:
-        """Issue a Mathpix request and translate transport failures for callers."""
+        """发起 Mathpix 请求并转换传输错误供调用者处理。"""
         payload = body[0] if body else None
         request = urllib.request.Request(f"{self.base_url}{path}", data=payload, method=method)
         request.add_header("app_id", self.app_id)
@@ -109,7 +104,7 @@ class MathpixClient:
             raise MathpixApiError(f"Mathpix API 请求失败: {exc.reason}") from exc
 
     def _error_detail(self, data: bytes) -> str:
-        """Keep Mathpix transport errors compact for task logs and reports."""
+        """精简传输错误供任务日志和报告使用。"""
         text = data.decode("utf-8", errors="replace").replace("\r", " ").replace("\n", " ").strip()
         for secret in {self.app_id, self.app_key}:
             if secret:
@@ -120,7 +115,7 @@ class MathpixClient:
 
     @staticmethod
     def _multipart_body(fields: dict[str, str], files: dict[str, tuple[str, bytes, str]]) -> tuple[bytes, str]:
-        """Build a multipart body without adding a third-party dependency."""
+        """使用标准库构建多部分请求体。"""
         boundary = f"k12-mathpix-{os.urandom(12).hex()}"
         chunks: list[bytes] = []
         for name, value in fields.items():
@@ -150,12 +145,12 @@ class MathpixClient:
 
     @staticmethod
     def _multipart_header_value(value: str) -> str:
-        """Keep multipart disposition parameters on a single safe header line."""
+        """确保多部分请求参数仅占一行安全头字段。"""
         return str(value).replace("\r", "_").replace("\n", "_").replace('"', "_")
 
     @staticmethod
     def _pdf_result_extension(extension: str) -> str:
-        """Allow only Mathpix result artifacts used by the K12 PDF-to-Word flow."""
+        """仅允许 K12 PDF 转 Word 使用的 Mathpix 产物类型。"""
         value = str(extension or "").strip().lower()
         if value not in MATHPIX_DOWNLOAD_EXTENSIONS:
             raise MathpixApiError(f"Unsupported Mathpix PDF result extension: {extension}")
@@ -163,7 +158,7 @@ class MathpixClient:
 
     @staticmethod
     def _pdf_result_id(pdf_id: str) -> str:
-        """Keep Mathpix PDF workflow requests on the expected API path."""
+        """限制 Mathpix PDF 请求在预期接口路径内。"""
         value = str(pdf_id or "").strip()
         if not value or any(char not in MATHPIX_ID_CHARS for char in value):
             raise MathpixApiError("Invalid Mathpix PDF id")
@@ -171,7 +166,7 @@ class MathpixClient:
 
     @staticmethod
     def _pdf_options(options: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Keep Mathpix options separate from K12-only OCR metadata."""
+        """分离 Mathpix 参数与 K12 专用 OCR 元数据。"""
         raw = dict(options or {})
         raw_formats = raw.get("conversion_formats") if isinstance(raw.get("conversion_formats"), dict) else {}
         if not raw_formats:
@@ -187,8 +182,7 @@ class MathpixClient:
         }
         if not formats:
             formats = {"docx": True}
-        # PDF-to-Word always needs a DOCX output even when callers request
-        # optional Mathpix artifacts such as tex.zip, HTML, or line data.
+        # PDF 转 Word 必须包含 DOCX，即使同时请求 tex.zip、HTML 或行数据等可选产物。
         formats["docx"] = True
         payload: dict[str, Any] = {"conversion_formats": formats}
         allowed_keys = {

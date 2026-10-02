@@ -1,9 +1,4 @@
-"""Local HTTP API and static-file server for the K12 workbench.
-
-The server exposes the PRD's browser workflow, report downloads, local-client
-handoff APIs, and token-gated sensitive payloads. It also redacts local paths by
-default so the web UI can operate without leaking filesystem details.
-"""
+"""提供本地 HTTP 接口与静态文件服务。支持浏览器工作流、报告下载、本地客户端交接，以及令牌保护的敏感载荷；默认脱敏本地路径。"""
 
 from __future__ import annotations
 
@@ -13,6 +8,7 @@ import json
 import mimetypes
 import re
 import secrets
+import webbrowser
 import zipfile
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -54,32 +50,32 @@ LOCAL_PATH_KEYS = {
 
 
 class JsonError(Exception):
-    """HTTP-facing error with a status code and user-readable message."""
+    """含 HTTP 状态码与用户可读消息的接口错误。"""
 
     def __init__(self, status: int, message: str) -> None:
-        """Store the HTTP status and response message for JSON error replies."""
+        """初始化当前对象所需的配置、依赖与运行状态。"""
         super().__init__(message)
         self.status = status
         self.message = message
 
 
 class K12RequestHandler(BaseHTTPRequestHandler):
-    """Route local API requests while enforcing token and login boundaries."""
+    """路由本地接口请求并强制执行令牌与登录边界。"""
 
     server_version = "K12LocalAPI/0.1"
 
     @property
     def store(self) -> AppStore:
-        """Return the request-scoped runtime store owned by the server."""
-        return self.server.store  # type: ignore[attr-defined]
+        """返回当前服务管理的请求运行存储。"""
+        return self.server.store  # type: ignore[attr-defined]  # 运行服务持有存储对象。
 
     @property
     def processor(self) -> TaskProcessor:
-        """Return the task processor bound to the current local server."""
-        return self.server.processor  # type: ignore[attr-defined]
+        """返回绑定当前本地服务的任务处理器。"""
+        return self.server.processor  # type: ignore[attr-defined]  # 运行服务持有处理器。
 
     def do_GET(self) -> None:
-        """Serve static assets or authorized JSON/download GET routes."""
+        """处理静态资源或已授权 JSON、下载 GET 路由。"""
         try:
             parsed = urlparse(self.path)
             if parsed.path.startswith("/api/"):
@@ -91,11 +87,11 @@ class K12RequestHandler(BaseHTTPRequestHandler):
                 self._serve_static(parsed.path)
         except JsonError as exc:
             self._json({"error": exc.message}, exc.status)
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:  # pragma: no cover  # 未预期异常的接口兜底。
             self._json({"error": str(exc)}, 500)
 
     def do_POST(self) -> None:
-        """Handle authorized JSON and multipart POST workflow routes."""
+        """处理已授权 JSON 和多部分上传 POST 路由。"""
         try:
             parsed = urlparse(self.path)
             if not parsed.path.startswith("/api/"):
@@ -130,11 +126,11 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             self._handle_api_post(parsed.path, payload)
         except JsonError as exc:
             self._json({"error": exc.message}, exc.status)
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:  # pragma: no cover  # 未预期异常的接口兜底。
             self._json({"error": str(exc)}, 500)
 
     def do_PUT(self) -> None:
-        """Handle authorized settings updates."""
+        """处理已授权设置更新。"""
         try:
             parsed = urlparse(self.path)
             self._ensure_authorized(parsed.path, parse_qs(parsed.query))
@@ -149,11 +145,11 @@ class K12RequestHandler(BaseHTTPRequestHandler):
                 raise JsonError(404, "Not found")
         except JsonError as exc:
             self._json({"error": exc.message}, exc.status)
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:  # pragma: no cover  # 未预期异常的接口兜底。
             self._json({"error": str(exc)}, 500)
 
     def do_DELETE(self) -> None:
-        """Handle authorized deletion routes for files, reports, and annotations."""
+        """处理文件、报告和标注的已授权删除路由。"""
         try:
             parsed = urlparse(self.path)
             self._ensure_authorized(parsed.path, parse_qs(parsed.query))
@@ -204,17 +200,17 @@ class K12RequestHandler(BaseHTTPRequestHandler):
                 raise JsonError(404, "Not found")
         except JsonError as exc:
             self._json({"error": exc.message}, exc.status)
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:  # pragma: no cover  # 未预期异常的接口兜底。
             self._json({"error": str(exc)}, 500)
 
     def do_OPTIONS(self) -> None:
-        """Return CORS preflight headers for local API clients."""
+        """返回本地客户端的跨域预检响应头。"""
         self.send_response(204)
         self._send_common_headers()
         self.end_headers()
 
     def _handle_api_get(self, path: str, query: dict[str, list[str]]) -> None:
-        """Dispatch authorized GET routes for browser, report, installer, and local-client reads."""
+        """分发浏览器、报告、安装包和客户端的已授权读取路由。"""
         if path == "/api/health":
             self._json({"status": "ok", "service": "K12", "version": "0.1.0"})
         elif path == "/api/files":
@@ -371,7 +367,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             raise JsonError(404, "Not found")
 
     def _handle_api_post(self, path: str, payload: dict) -> None:
-        """Dispatch authorized POST routes for uploads, tasks, annotations, sync, and settings."""
+        """分发上传、任务、标注、同步和设置的已授权提交路由。"""
         if path == "/api/files":
             try:
                 if "files" in payload:
@@ -537,7 +533,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             raise JsonError(404, "Not found")
 
     def _serve_static(self, path: str) -> None:
-        """Serve static UI files while keeping requests inside STATIC_DIR."""
+        """提供静态界面文件，并限制请求在静态资源目录内。"""
         clean_path = path.strip("/") or "index.html"
         target = (STATIC_DIR / clean_path).resolve()
         if not str(target).startswith(str(STATIC_DIR.resolve())):
@@ -556,7 +552,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _ensure_authorized(self, path: str, query: dict[str, list[str]]) -> None:
-        """Require the local security token once the user configures one."""
+        """配置本地安全令牌后强制检查令牌。"""
         if path == "/api/health":
             return
         expected = str(self.store.get_settings().get("localSecurityToken") or "").strip()
@@ -572,7 +568,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             raise JsonError(401, "本地 API 安全令牌无效或缺失")
 
     def _ensure_logged_in(self, path: str, method: str) -> None:
-        """Require an active local user session when the workspace enables login."""
+        """启用登录时要求存在有效本地会话。"""
         if not path.startswith("/api/"):
             return
         if not self.store.get_settings().get("requireLogin", False):
@@ -585,13 +581,13 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             raise JsonError(401, "请先登录后再访问本地 API")
 
     def _ensure_local_payload_token_configured(self) -> None:
-        """Block local task payload reads until a local security token exists."""
+        """没有本地安全令牌时阻止读取敏感任务载荷。"""
         expected = str(self.store.get_settings().get("localSecurityToken") or "").strip()
         if not expected:
             raise JsonError(403, "本地任务载荷包含本地路径，请先配置本地安全令牌")
 
     def _read_json(self) -> dict:
-        """Read one JSON request body and map parse failures to a JSON API error."""
+        """读取 JSON 请求体，将解析失败转换为接口错误。"""
         length = int(self.headers.get("Content-Length") or 0)
         if length == 0:
             return {}
@@ -602,7 +598,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             raise JsonError(400, "Invalid JSON") from exc
 
     def _read_multipart_uploads(self) -> list[dict]:
-        """Parse multipart file uploads while enforcing the configured size limit."""
+        """解析多部分文件上传并执行大小限制。"""
         content_type = self.headers.get("Content-Type") or ""
         match = re.search(r"boundary=([^;]+)", content_type)
         if not match:
@@ -635,7 +631,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         return uploads
 
     def _send_report_file(self, report: dict, file_format: str) -> None:
-        """Stream one generated report format from the managed report paths."""
+        """从受管报告路径发送指定格式的报告。"""
         choices = {
             "json": ("json_path", "application/json; charset=utf-8"),
             "html": ("html_path", "text/html; charset=utf-8"),
@@ -654,7 +650,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_source_file(self, file_id: str) -> None:
-        """Stream a registered source file through the processor download contract."""
+        """按处理器下载约定发送注册源文件。"""
         info, data = self._read_verified_source(file_id)
         path = Path(info["path"])
         content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
@@ -668,7 +664,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _read_verified_source(self, file_id: str) -> tuple[dict, bytes]:
-        """Read a source snapshot and recheck its registered size and hash."""
+        """读取源快照并复核注册大小与哈希。"""
         try:
             info = self.processor.file_download_info(file_id)
         except KeyError as exc:
@@ -685,7 +681,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         return info, data
 
     def _send_installer(self, file_name: str, query: dict[str, list[str]] | None = None) -> None:
-        """Stream a registered Windows or macOS installer with MathType boundary headers."""
+        """发送注册的 Windows 或 macOS 安装包及 MathType 边界响应头。"""
         info, data = self._read_verified_installer(file_name, query)
         path = Path(info["path"])
         content_type = mimetypes.guess_type(str(path))[0] or "application/octet-stream"
@@ -705,7 +701,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _read_verified_installer(self, file_name: str, query: dict[str, list[str]] | None = None) -> tuple[dict, bytes]:
-        """Read an installer snapshot and recheck its descriptor size and hash."""
+        """读取安装包快照并复核描述中的大小与哈希。"""
         try:
             requested_platform = (query or {}).get("platform", [None])[0]
             info = self.processor.installer_download_info(file_name, requested_platform)
@@ -723,7 +719,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         return info, data
 
     def _send_files_bundle(self, query: dict[str, list[str]]) -> None:
-        """Build a ZIP of selected source files plus a manifest of successes and failures."""
+        """将所选源文件及成功失败清单打包为 ZIP。"""
         ids = self._query_ids(query)
         file_type = query.get("type", [""])[0]
         if ids:
@@ -768,7 +764,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_image_asset(self, asset_path: str) -> None:
-        """Serve a registered report-image snapshot from the managed image root."""
+        """从受管图片根目录发送已注册报告图片快照。"""
         target, data = self._read_verified_image_asset(asset_path)
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         self.send_response(200)
@@ -779,7 +775,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _read_verified_image_asset(self, asset_path: str) -> tuple[Path, bytes]:
-        """Read a report image only when its record size and hash match the snapshot."""
+        """仅在记录大小与哈希匹配时读取报告图片。"""
         root = self.store.images_dir.resolve()
         target = (self.store.data_dir / asset_path).resolve()
         try:
@@ -809,7 +805,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         return target, data
 
     def _send_replacement_asset(self, file_name: str) -> None:
-        """Serve one registered replacement-image snapshot from the upload cache."""
+        """从上传缓存发送注册的替换图片快照。"""
         safe_name = Path(file_name).name
         root = self.store.uploads_dir.resolve()
         target = (root / safe_name).resolve()
@@ -838,7 +834,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_artifact(self, path: str) -> None:
-        """Serve successful task artifacts only when a report registered the output."""
+        """仅发送由报告登记的成功任务产物。"""
         parts = path.strip("/").split("/")
         if len(parts) < 3:
             raise JsonError(404, "Artifact not found")
@@ -855,7 +851,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _read_verified_artifact(self, task_id: str, file_name: str) -> tuple[Path, bytes]:
-        """Read an artifact snapshot and recheck its registered size and hash."""
+        """读取产物快照并复核注册大小与哈希。"""
         target = self._find_artifact_path(task_id, file_name)
         reports = [report for report in self.store.list_reports() if report.get("task_id") == task_id]
         latest_report = reports[0] if reports else {}
@@ -878,7 +874,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         return target, data
 
     def _find_artifact_path(self, task_id: str, file_name: str) -> Path:
-        """Find a successful artifact from the latest report without trusting URL paths."""
+        """从最新报告查找成功产物，不信任网址传入路径。"""
         output_root = self.store.output_task_dir(task_id).resolve()
         reports = [report for report in self.store.list_reports() if report.get("task_id") == task_id]
         latest_report = reports[0] if reports else {}
@@ -914,7 +910,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         raise JsonError(404, "Artifact not found")
 
     def _send_task_bundle(self, task_id: str) -> None:
-        """Build a task result ZIP containing reports, logs, and registered outputs."""
+        """将报告、日志和注册输出打包为任务结果 ZIP。"""
         task = self.store.get_task(task_id)
         if not task:
             raise JsonError(404, "Task not found")
@@ -966,7 +962,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _managed_report_path(self, report: dict, key: str, allow_fallback: bool = True) -> Path:
-        """Resolve one report file only when its path and registered integrity remain valid."""
+        """仅在路径及注册完整性有效时解析报告文件。"""
         raw_path = report.get(key) or (report.get("report_path") if allow_fallback else "") or ""
         candidate = Path(str(raw_path))
         if not candidate.exists() or not candidate.is_file():
@@ -985,7 +981,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         return resolved
 
     def _read_managed_report(self, report: dict, key: str, allow_fallback: bool = True) -> tuple[Path, bytes]:
-        """Read a report snapshot and recheck its registered size and hash."""
+        """读取报告快照并复核注册大小与哈希。"""
         path = self._managed_report_path(report, key, allow_fallback=allow_fallback)
         integrity = (report.get("report_file_integrity") or {}).get(key) or {}
         try:
@@ -998,7 +994,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         return path, data
 
     def _send_report_images(self, report_id: str) -> None:
-        """Build the small-image ZIP export with annotations and a manifest CSV."""
+        """生成含标注和清单 CSV 的小图片 ZIP。"""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -1066,7 +1062,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_report_image_manifest_xlsx(self, report_id: str) -> None:
-        """Stream the small-image manifest workbook for one report."""
+        """发送指定报告的小图片清单工作簿。"""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -1081,7 +1077,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_report_formulas(self, report_id: str) -> None:
-        """Stream the formula ZIP export with MathML, TEX, JSON, and annotations."""
+        """发送含 MathML、TeX、JSON 和标注的公式 ZIP。"""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -1096,7 +1092,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_report_formula_xlsx(self, report_id: str) -> None:
-        """Stream the formula workbook export for one report."""
+        """发送指定报告的公式工作簿。"""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -1111,7 +1107,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_report_failures(self, report_id: str) -> None:
-        """Stream the standard failure-list CSV for one report."""
+        """发送指定报告的标准失败清单 CSV。"""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -1126,7 +1122,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_report_omml_failures(self, report_id: str) -> None:
-        """Stream OMML dependency and conversion failure rows with path redaction settings."""
+        """按路径脱敏设置发送 OMML 依赖与转换失败行。"""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -1142,7 +1138,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_report_macro_failures(self, report_id: str) -> None:
-        """Stream macro failure rows with backup and restore guidance."""
+        """发送宏失败行及备份恢复指导。"""
         report = self.store.get_report(report_id)
         if not report:
             raise JsonError(404, "Report not found")
@@ -1157,7 +1153,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_logs_file(self, task_id: str | None = None, export_format: str | None = None) -> None:
-        """Export redacted task or system logs in the requested safe format."""
+        """按安全格式导出脱敏任务或系统日志。"""
         logs = self.store.list_logs(task_id, limit=5000)
         public_logs = [self._public_log(item) for item in reversed(logs)]
         export_format = self._log_export_format(export_format)
@@ -1178,12 +1174,12 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _log_export_format(self, requested: str | None) -> str:
-        """Normalize log download formats to the supported extension set."""
+        """将日志下载格式规范为支持的扩展名。"""
         value = str(requested or self.store.get_settings().get("logExportFormat", "txt") or "txt").lower()
         return value if value in {"txt", "log", "csv", "json"} else "txt"
 
     def _log_export_bytes(self, logs: list[dict], export_format: str) -> bytes:
-        """Render public log rows as JSON, CSV, or plain text bytes."""
+        """将公开日志渲染为 JSON、CSV 或纯文本字节。"""
         if export_format == "json":
             return json.dumps({"logs": logs}, ensure_ascii=False, indent=2).encode("utf-8")
         if export_format == "csv":
@@ -1210,7 +1206,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _add_bundle_path(archive: zipfile.ZipFile, path: Path, folder: str, added: set[str]) -> None:
-        """Add one existing file to a ZIP folder while avoiding duplicate names."""
+        """将现有文件加入 ZIP 指定目录并避免重名。"""
         if not path.exists() or not path.is_file():
             return
         name = f"{folder}/{path.name}"
@@ -1221,7 +1217,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _query_ids(query: dict[str, list[str]]) -> list[str]:
-        """Return de-duplicated ids parsed from repeated or comma-separated query values."""
+        """解析重复或逗号分隔的查询值并去重。"""
         ids: list[str] = []
         for raw in query.get("ids", []):
             ids.extend(item.strip() for item in raw.split(",") if item.strip())
@@ -1229,7 +1225,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _unique_zip_name(name: str, added: set[str]) -> str:
-        """Reserve a safe unique ZIP entry name under the requested folder."""
+        """在指定目录内保留安全唯一的 ZIP 条目名。"""
         safe = "/".join(Path(part).name for part in name.split("/") if part)
         path = Path(safe)
         candidate = safe
@@ -1242,13 +1238,13 @@ class K12RequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _csv_cell(value: object) -> str:
-        """Quote one CSV cell without relying on platform-specific csv dialect state."""
+        """按确定的导出规则引用 CSV 单元格。"""
         text = str(value).replace('"', '""')
         return f'"{text}"'
 
     @staticmethod
     def _small_image_kind(image: dict) -> str:
-        """Classify a small image for exports using the PRD review categories."""
+        """对小图片分类供清单和工作簿导出使用。"""
         if image.get("is_formula_like"):
             return "公式"
         if image.get("is_qrcode_like"):
@@ -1260,7 +1256,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         return "图标"
 
     def _public_payload(self, value: object) -> object:
-        """Return API payloads with local filesystem paths redacted by default."""
+        """返回默认脱敏本地文件路径的接口载荷。"""
         if self.store.get_settings().get("exposeLocalPaths", False):
             return value
         if isinstance(value, list):
@@ -1284,7 +1280,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         return value
 
     def _public_settings(self, settings: dict) -> dict:
-        """Return settings safe for browser reads without exposing local secrets."""
+        """返回可安全公开给浏览器的设置，不暴露秘密。"""
         public = self._public_payload(dict(settings))
         if not isinstance(public, dict):
             public = dict(settings)
@@ -1294,7 +1290,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         return public
 
     def _public_log(self, log: dict) -> dict:
-        """Return one log row with local paths redacted unless explicitly allowed."""
+        """除非明确允许，否则返回路径脱敏的日志行。"""
         if self.store.get_settings().get("exposeLocalPaths", False):
             return dict(log)
         item = dict(log)
@@ -1303,7 +1299,7 @@ class K12RequestHandler(BaseHTTPRequestHandler):
 
     @staticmethod
     def _redacted_path_label(value: object) -> str:
-        """Replace a local path with a stable filename-only redaction label."""
+        """将本地路径替换为稳定的仅含文件名标签。"""
         if not value:
             return ""
         name = Path(str(value)).name
@@ -1311,18 +1307,18 @@ class K12RequestHandler(BaseHTTPRequestHandler):
 
     @classmethod
     def _redact_text_paths(cls, text: str) -> str:
-        """Redact common macOS, Linux, and Windows absolute paths from log text."""
+        """脱敏日志中的常见 macOS、Linux 和 Windows 绝对路径。"""
         pattern = r"(/Users/[^\s，,;]+|/private/[^\s，,;]+|/var/folders/[^\s，,;]+|/tmp/[^\s，,;]+|[A-Za-z]:\\[^\s，,;]+)"
         return re.sub(pattern, lambda match: cls._redacted_path_label(match.group(0)), text)
 
     @staticmethod
     def _attachment_name(value: object) -> str:
-        """Keep Content-Disposition filenames on one safe header line."""
+        """确保下载文件名只占一行安全响应头。"""
         name = Path(str(value or "download")).name or "download"
         return name.replace("\r", "_").replace("\n", "_").replace('"', "_")
 
     def _json(self, payload: dict, status: int = 200) -> None:
-        """Send one JSON response with common CORS headers."""
+        """发送 JSON 响应并附加通用跨域响应头。"""
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -1332,52 +1328,57 @@ class K12RequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _send_common_headers(self) -> None:
-        """Attach CORS headers used by the local browser UI and companion client."""
+        """附加本地网页和伴随客户端使用的跨域响应头。"""
         self.send_header("Access-Control-Allow-Origin", self._cors_origin())
         self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, X-K12-Token, Authorization")
 
     def _cors_origin(self) -> str:
-        """Allow only localhost-style origins for browser access to the local API."""
+        """浏览器访问本地接口时仅允许本机来源。"""
         origin = self.headers.get("Origin") or ""
         if re.fullmatch(r"http://(127\.0\.0\.1|localhost)(:\d+)?", origin):
             return origin
         return "http://127.0.0.1"
 
     def log_message(self, format: str, *args: object) -> None:
-        """Silence default HTTP logging so task logs remain the source of truth."""
+        """关闭默认 HTTP 日志，以任务日志为准。"""
         return
 
 
 class K12Server(ThreadingHTTPServer):
-    """Threaded local server that owns one AppStore and TaskProcessor."""
+    """拥有运行存储和任务处理器的多线程本地服务。"""
 
     def __init__(self, server_address: tuple[str, int], handler_class: type[K12RequestHandler], data_dir: Path) -> None:
-        """Create the runtime store, processor, recovery pass, and cleanup pass."""
+        """初始化当前对象所需的配置、依赖与运行状态。"""
         super().__init__(server_address, handler_class)
         self.store = AppStore(data_dir)
         self.processor = TaskProcessor(self.store)
         self.processor.recover_interrupted_tasks()
         try:
             self.processor.auto_cleanup_runtime_history()
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:  # pragma: no cover  # 未预期异常的接口兜底。
             self.store.append_log("system", f"自动清理失败：{exc}", "error")
 
 
 def main() -> None:
-    """Start the local K12 HTTP server with a configurable runtime data dir."""
+    """按指定数据目录启动本地 HTTP 服务，可选择自动打开浏览器。"""
     parser = argparse.ArgumentParser(description="Run the K12 local document processing workbench.")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8765, type=int)
     parser.add_argument("--data-dir", default=".k12-data")
+    parser.add_argument("--open-browser", action="store_true", help="启动后在默认浏览器打开工作台")
     args = parser.parse_args()
 
     server = K12Server((args.host, args.port), K12RequestHandler, Path(args.data_dir))
     print(f"K12 running at http://{args.host}:{args.port}")
+    if args.open_browser:
+        webbrowser.open(f"http://{args.host}:{server.server_port}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nK12 stopped")
+    finally:
+        server.server_close()
 
 
 if __name__ == "__main__":

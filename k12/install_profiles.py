@@ -1,10 +1,4 @@
-"""Platform-specific local client install profiles for K12.
-
-Windows and macOS use different installers and different MathType native object
-formats. These profiles keep that boundary explicit so document handoff code can
-offer same-platform native objects while still requiring MathML, LaTeX, or image
-fallbacks for cross-platform delivery.
-"""
+"""定义各平台的本地客户端安装配置。Windows 与 macOS 的安装包及 MathType 原生对象格式不同；同平台可交接原生对象，跨平台必须提供 MathML、LaTeX 或图片兜底。"""
 
 from __future__ import annotations
 
@@ -27,15 +21,14 @@ TASK_ROUTING = {
 }
 
 
-# Keep installer and MathType object details separated by platform; merging
-# these profiles would risk treating incompatible MathType objects as portable.
+# 按平台区分安装包与 MathType 对象，避免把不兼容对象误认为可跨平台使用。
 PROFILES: dict[str, dict[str, Any]] = {
     "Windows": {
         "platform": "Windows",
         "installerKind": "windows-msi",
         "recommendedInstaller": "K12 Windows 本地客户端",
         "downloadLabel": "下载 Windows 安装包",
-        "officeAutomation": "Office COM + pywin32 可执行 Word/PPT/Excel 自动化",
+        "officeAutomation": "Windows PowerShell + Office COM 可执行旧 Word/PPT 规范化，无需 pywin32",
         "mathType": "Windows MathType/OLE 对象可作为本机编辑格式",
         "mathtypeObjectFormat": "Windows OLE / Equation Native",
         "formulaPortability": "Windows 与 macOS MathType 公式对象不通用，跨平台任务需同时生成 MathML、LaTeX 或图片兜底。",
@@ -130,7 +123,7 @@ PROFILES: dict[str, dict[str, Any]] = {
 
 
 def detect_platform(configured: str | None = None) -> str:
-    """Resolve an explicit or automatic local client platform selection."""
+    """解析显式指定或自动检测的客户端平台。"""
     value = (configured or "auto").strip()
     if value and value.lower() != "auto":
         return normalize_platform(value)
@@ -143,7 +136,7 @@ def detect_platform(configured: str | None = None) -> str:
 
 
 def normalize_platform(value: str | None) -> str:
-    """Normalize common platform aliases to the names used in install profiles."""
+    """将常见平台别名规范为安装配置使用的名称。"""
     lowered = (value or "").strip().lower()
     if lowered in {"windows", "win", "win32", "win64"}:
         return "Windows"
@@ -153,7 +146,7 @@ def normalize_platform(value: str | None) -> str:
 
 
 def install_profile(platform_name: str | None = None, settings: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Return a copy of the selected install profile with formula interop rules."""
+    """返回所选平台安装配置的副本，包含公式互操作规则。"""
     configured = platform_name if platform_name is not None else str((settings or {}).get("localClientPlatform") or "auto")
     system_name = detect_platform(configured)
     profile = copy.deepcopy(PROFILES.get(system_name, PROFILES["Unknown"]))
@@ -165,7 +158,7 @@ def install_profile(platform_name: str | None = None, settings: dict[str, Any] |
 
 
 def _formula_object_interop(profile: dict[str, Any], compatibility_mode: str) -> dict[str, Any]:
-    """Describe whether native MathType objects may be handed to the client."""
+    """说明原生 MathType 对象能否交接给客户端。"""
     platform_name = normalize_platform(str(profile.get("platform") or "Unknown"))
     platform_known = platform_name in {"Windows", "macOS"}
     native_object_allowed = platform_known and compatibility_mode == "platform-specific"

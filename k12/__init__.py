@@ -1,4 +1,4 @@
-"""K12 local-first document processing workbench."""
+"""K12 本地优先的文档处理工作台。"""
 
 __version__ = "0.1.0"
 

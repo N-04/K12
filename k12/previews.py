@@ -1,9 +1,4 @@
-"""Structured preview builders for files managed by the K12 workbench.
-
-Previews are intentionally metadata- and structure-oriented: they help the web
-UI show document contents, OCR needs, and local-client requirements without
-editing user documents or exposing sensitive local paths.
-"""
+"""构建受管文件的结构化预览。展示内容、OCR 需求和本地客户端要求，不编辑用户文档，也不暴露敏感本地路径。"""
 
 from __future__ import annotations
 
@@ -17,7 +12,7 @@ from .converters import extract_docx_blocks, extract_pptx_slides, extract_xlsx_s
 
 
 def build_file_preview(file: dict[str, Any]) -> dict[str, Any]:
-    """Build a safe preview payload for one stored file record."""
+    """为已保存文件生成安全预览载荷。"""
     path = Path(file.get("storage_path") or file.get("file_path") or "")
     preview = {
         "file_id": file.get("id", ""),
@@ -66,7 +61,7 @@ def build_file_preview(file: dict[str, Any]) -> dict[str, Any]:
 
 
 def _word_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> None:
-    """Populate preview pages and object counts for OOXML Word files."""
+    """填充 OOXML Word 的预览页与对象计数。"""
     if path.suffix.lower() not in {".docx", ".docm", ".dotx", ".dotm"}:
         preview["status"] = "local_required"
         preview["mode"] = "local-client"
@@ -97,7 +92,7 @@ def _word_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> 
 
 
 def _ppt_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> None:
-    """Populate preview pages and object counts for OOXML presentation files."""
+    """填充 OOXML 演示文稿的预览页与对象计数。"""
     if path.suffix.lower() not in {".pptx", ".pptm"}:
         preview["status"] = "local_required"
         preview["mode"] = "local-client"
@@ -127,7 +122,7 @@ def _ppt_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> N
 
 
 def _excel_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> None:
-    """Populate preview pages and object counts for OOXML workbook files."""
+    """填充 OOXML 工作簿的预览页与对象计数。"""
     if path.suffix.lower() not in {".xlsx", ".xlsm"}:
         preview["status"] = "local_required"
         preview["mode"] = "local-client"
@@ -154,7 +149,7 @@ def _excel_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) ->
 
 
 def _pdf_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> None:
-    """Populate a metadata-first PDF preview with OCR and Mathpix hints."""
+    """填充以元数据为主的 PDF 预览及 OCR、Mathpix 线索。"""
     data = path.read_bytes()[:3_000_000]
     text = data.decode("latin-1", errors="ignore")
     snippets = _pdf_text_snippets(text)
@@ -184,7 +179,7 @@ def _pdf_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> N
 
 
 def _image_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> None:
-    """Populate image preview metadata without decoding full pixel content."""
+    """填充图片预览元数据，不解码完整像素内容。"""
     dimensions = _image_dimensions(path.read_bytes()[:2_000_000])
     text = "图片尺寸未识别"
     if dimensions:
@@ -196,7 +191,7 @@ def _image_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) ->
 
 
 def _zip_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> None:
-    """Populate archive preview rows from safe ZIP entry metadata."""
+    """根据安全 ZIP 条目元数据填充压缩包预览。"""
     with zipfile.ZipFile(path) as archive:
         entries = [info for info in archive.infolist() if not info.is_dir()]
     preview["pages"] = [
@@ -213,7 +208,7 @@ def _zip_preview(path: Path, file: dict[str, Any], preview: dict[str, Any]) -> N
 
 
 def _base_objects(file: dict[str, Any]) -> list[dict[str, Any]]:
-    """Build preview object badges from file-level capability flags."""
+    """根据文件能力标记生成预览对象徽标。"""
     objects: list[dict[str, Any]] = []
     flags = [
         ("公式", file.get("has_formula"), "需预检"),
@@ -231,7 +226,7 @@ def _base_objects(file: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _add_count_object(preview: dict[str, Any], label: str, count: Any, status: str) -> None:
-    """Append a counted preview object when the amount is positive."""
+    """数量为正时附加计数预览对象。"""
     amount = int(count or 0)
     if amount <= 0:
         return
@@ -239,7 +234,7 @@ def _add_count_object(preview: dict[str, Any], label: str, count: Any, status: s
 
 
 def _metadata_pages(file: dict[str, Any]) -> list[dict[str, Any]]:
-    """Create fallback preview pages from stored metadata only."""
+    """仅用已存元数据生成兜底预览页。"""
     summary = file.get("content_summary") or {}
     details = [f"{key}: {value}" for key, value in list(summary.items())[:12]]
     if not details:
@@ -248,7 +243,7 @@ def _metadata_pages(file: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _attach_preview_markers(preview: dict[str, Any], file: dict[str, Any]) -> dict[str, Any]:
-    """Attach formula, OMML, macro, image, and confidence markers to preview pages."""
+    """为预览页附加公式、OMML、宏、图片及置信度标记。"""
     markers = _preview_markers(file)
     if not markers:
         return preview
@@ -270,7 +265,7 @@ def _attach_preview_markers(preview: dict[str, Any], file: dict[str, Any]) -> di
 
 
 def _preview_markers(file: dict[str, Any]) -> list[dict[str, str]]:
-    """Return marker chips that explain PRD-sensitive preview findings."""
+    """返回解释敏感预览发现的标记标签。"""
     markers: list[dict[str, str]] = []
     marker_specs = [
         ("公式", file.get("has_formula"), "warn", "公式高亮", "检测到公式对象，建议进入公式预检"),
@@ -287,7 +282,7 @@ def _preview_markers(file: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def _has_low_confidence_hint(file: dict[str, Any]) -> bool:
-    """Return whether preview should expose a low-confidence warning marker."""
+    """判断预览是否应显示低置信度警告。"""
     summary = file.get("content_summary") or {}
     if file.get("validation_errors"):
         return True
@@ -295,7 +290,7 @@ def _has_low_confidence_hint(file: dict[str, Any]) -> bool:
 
 
 def _sheet_preview_text(sheet: dict[str, Any]) -> str:
-    """Format the first extracted worksheet cells for compact preview text."""
+    """将工作表前几个单元格格式化为简短预览文本。"""
     cells = sheet.get("cells", [])
     if not cells:
         return "未提取到可显示单元格"
@@ -303,7 +298,7 @@ def _sheet_preview_text(sheet: dict[str, Any]) -> str:
 
 
 def _pdf_text_snippets(text: str) -> list[str]:
-    """Extract small PDF text-showing snippets from raw page content."""
+    """从简单 PDF 文本操作符提取有大小限制的文本片段。"""
     chunks = []
     for pattern in [r"\(([^()]{3,160})\)\s*Tj", r"\(([^()]{3,160})\)\s*'"]:
         for value in re.findall(pattern, text):
@@ -314,12 +309,12 @@ def _pdf_text_snippets(text: str) -> list[str]:
 
 
 def _clean_preview_text(value: str) -> str:
-    """Normalize preview text extracted from XML, PDF, or archive metadata."""
+    """规范从 XML、PDF 或压缩包元数据提取的预览文本。"""
     return html.unescape(re.sub(r"\s+", " ", value)).strip()
 
 
 def _image_dimensions(data: bytes) -> tuple[int, int, str] | None:
-    """Read basic PNG, GIF, BMP, or JPEG dimensions from header bytes."""
+    """从常见图片头读取宽高。"""
     if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
         return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big"), "png"
     if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
@@ -332,7 +327,7 @@ def _image_dimensions(data: bytes) -> tuple[int, int, str] | None:
 
 
 def _jpeg_dimensions(data: bytes) -> tuple[int, int, str] | None:
-    """Read JPEG dimensions by scanning safe frame headers."""
+    """从 SOF 标记读取 JPEG 宽高。"""
     index = 2
     while index + 9 < len(data):
         if data[index] != 0xFF:

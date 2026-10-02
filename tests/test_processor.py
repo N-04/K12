@@ -305,50 +305,50 @@ class TaskProcessorTests(unittest.TestCase):
             if ast.get_docstring(processor_methods[name]) is None
         ]
         self.assertFalse(missing_processor_docstrings, f"TaskProcessor docstrings missing: {missing_processor_docstrings}")
-        self.assertIn("local-first baseline", converters_module.__doc__ or "")
-        self.assertIn("Office, MathType, OMML writeback", converters_module.__doc__ or "")
-        self.assertIn("downloadable reports", exports_module.__doc__ or "")
-        self.assertIn("without reaching back into local source paths", exports_module.__doc__ or "")
-        self.assertIn("editing user documents", previews_module.__doc__ or "")
-        self.assertIn("token-gated sensitive payloads", server_module.__doc__ or "")
-        self.assertIn("redacts local paths", server_module.__doc__ or "")
-        self.assertIn("SQLite-backed runtime store", store_module.__doc__ or "")
-        self.assertIn("public redaction happens at the API layer", store_module.__doc__ or "")
-        self.assertIn("Core data models", models_module.__doc__ or "")
-        self.assertIn("Business orchestration", processor_module.__doc__ or "")
-        self.assertIn("does not claim real Office", processor_module.__doc__ or "")
-        self.assertIn("Report generation", reports_module.__doc__ or "")
-        self.assertIn("local-client handoff", reports_module.__doc__ or "")
-        self.assertIn("safe handoff step", local_client_module.LocalClientError.__doc__ or "")
+        self.assertIn('使用标准库提取文档结构并提供轻量转换。支持本地优先的基础功能，为预览、报告和最小 OOXML 产物提取结构；完整 Office 渲染、MathType、OMML 写回和宏处理交由本地客户端执行。', converters_module.__doc__ or "")
+        self.assertIn('使用标准库提取文档结构并提供轻量转换。支持本地优先的基础功能，为预览、报告和最小 OOXML 产物提取结构；完整 Office 渲染、MathType、OMML 写回和宏处理交由本地客户端执行。', converters_module.__doc__ or "")
+        self.assertIn('生成公式、图片、宏和失败记录的可下载报告。仅从已保存的报告数据构建 CSV、JSON、TeX、MathML 和 XLSX 文件，不回读本地源文件路径。', exports_module.__doc__ or "")
+        self.assertIn('生成公式、图片、宏和失败记录的可下载报告。仅从已保存的报告数据构建 CSV、JSON、TeX、MathML 和 XLSX 文件，不回读本地源文件路径。', exports_module.__doc__ or "")
+        self.assertIn('构建受管文件的结构化预览。展示内容、OCR 需求和本地客户端要求，不编辑用户文档，也不暴露敏感本地路径。', previews_module.__doc__ or "")
+        self.assertIn('提供本地 HTTP 接口与静态文件服务。支持浏览器工作流、报告下载、本地客户端交接，以及令牌保护的敏感载荷；默认脱敏本地路径。', server_module.__doc__ or "")
+        self.assertIn('提供本地 HTTP 接口与静态文件服务。支持浏览器工作流、报告下载、本地客户端交接，以及令牌保护的敏感载荷；默认脱敏本地路径。', server_module.__doc__ or "")
+        self.assertIn('使用 SQLite 保存本地运行数据。在同一目录管理上传、报告、输出、设置、用户、授权和标注。密码仅保存在进程内存；公开数据在接口层脱敏。', store_module.__doc__ or "")
+        self.assertIn('使用 SQLite 保存本地运行数据。在同一目录管理上传、报告、输出、设置、用户、授权和标注。密码仅保存在进程内存；公开数据在接口层脱敏。', store_module.__doc__ or "")
+        self.assertIn('定义 K12 的核心数据模型和任务标签。规范上传、任务、公式、宏、图片和报告记录；持久化及接口脱敏分别由存储层和服务层负责。', models_module.__doc__ or "")
+        self.assertIn('负责文档分析、任务和需求验收证据的业务编排。连接本地记录、前端接口、Mathpix OCR 授权和桌面执行计划。除非同平台客户端回传结果，否则不声称执行了真实 Office、MathType、OMML 写回或 Word 宏。', processor_module.__doc__ or "")
+        self.assertIn('负责文档分析、任务和需求验收证据的业务编排。连接本地记录、前端接口、Mathpix OCR 授权和桌面执行计划。除非同平台客户端回传结果，否则不声称执行了真实 Office、MathType、OMML 写回或 Word 宏。', processor_module.__doc__ or "")
+        self.assertIn('为任务结果和验收证据生成报告。将分析结果输出为 JSON、HTML、文本、PDF、XLSX 和失败 CSV，记录质量检查、Mathpix 状态、本地客户端交接及可处理的失败原因。', reports_module.__doc__ or "")
+        self.assertIn('为任务结果和验收证据生成报告。将分析结果输出为 JSON、HTML、文本、PDF、XLSX 和失败 CSV，记录质量检查、Mathpix 状态、本地客户端交接及可处理的失败原因。', reports_module.__doc__ or "")
+        self.assertIn('本地伴随客户端无法完成安全交接步骤时抛出。', local_client_module.LocalClientError.__doc__ or "")
         self.assertEqual(local_client_module.LocalClientError.code, "local_client_error")
         self.assertEqual(MathpixConfigError.code, "mathpix_config_error")
         self.assertEqual(MathpixApiError.code, "mathpix_api_error")
-        self.assertIn("managed upload cache", store_module.AppStore._cleanup_uploaded_payloads.__doc__ or "")
-        self.assertIn("managed reports directory", store_module.AppStore._cleanup_report_files.__doc__ or "")
-        self.assertIn("managed image directory", store_module.AppStore._cleanup_report_image_files.__doc__ or "")
-        self.assertIn("task-scoped output", store_module.AppStore._cleanup_runtime_dirs.__doc__ or "")
-        self.assertIn("local K12 API origin", local_client_module.normalize_origin.__doc__ or "")
-        self.assertIn("path-redacted heartbeat", local_client_module.build_heartbeat.__doc__ or "")
-        self.assertIn("never sends component paths or token material", local_client_module.build_heartbeat.__doc__ or "")
-        self.assertIn("without leaking local paths or tokens", local_client_module.summarize_payload.__doc__ or "")
-        self.assertIn("without leaking local paths or tokens", local_client_module.summarize_manifest.__doc__ or "")
-        self.assertIn("without executing native document actions", local_client_module.build_dry_run_execution_summary.__doc__ or "")
-        self.assertIn("same-platform formula delivery contract", local_client_module.build_dry_run_execution_summary.__doc__ or "")
-        self.assertIn("formula-platform checks", local_client_module._dry_run_blockers.__doc__ or "")
-        self.assertIn("dry-run handoff validation only", local_client_module.build_dry_run_sync_payload.__doc__ or "")
-        self.assertIn("same-platform native runner", local_client_module.build_native_execution_request.__doc__ or "")
-        self.assertIn("Office for Mac runs only when both explicit execution flags are set", local_client_module.run_once.__doc__ or "")
-        self.assertIn("MathType, OMML writeback, and Word macros remain disabled", local_client_module.run_once.__doc__ or "")
-        self.assertIn("redacted JSON handoff result", local_client_module.main.__doc__ or "")
-        self.assertIn("Extract visible DOCX", converters_module.extract_docx_blocks.__doc__ or "")
-        self.assertIn("Package formulas", exports_module.build_formula_zip.__doc__ or "")
-        self.assertIn("safe preview payload", previews_module.build_file_preview.__doc__ or "")
-        self.assertIn("local security token", server_module.K12RequestHandler._ensure_authorized.__doc__ or "")
-        self.assertIn("runtime directories", store_module.AppStore.__doc__ or "")
-        self.assertIn("Uploaded or discovered file metadata", models_module.FileItem.__doc__ or "")
-        self.assertIn("Classify uploads", processor_module.DocumentAnalyzer.__doc__ or "")
-        self.assertIn("PRD acceptance evidence", processor_module.TaskProcessor.acceptance_matrix.__doc__ or "")
-        self.assertIn("downloadable report formats", reports_module.ReportBuilder.build.__doc__ or "")
+        self.assertIn('清理受管上传缓存，不操作外部源路径。', store_module.AppStore._cleanup_uploaded_payloads.__doc__ or "")
+        self.assertIn('仅删除受管报告目录中的报告产物。', store_module.AppStore._cleanup_report_files.__doc__ or "")
+        self.assertIn('仅删除受管图片目录中的报告图片缓存。', store_module.AppStore._cleanup_report_image_files.__doc__ or "")
+        self.assertIn('删除受管根目录下按任务隔离的输出、备份和图片目录。', store_module.AppStore._cleanup_runtime_dirs.__doc__ or "")
+        self.assertIn('检查并规范本地 K12 接口地址。', local_client_module.normalize_origin.__doc__ or "")
+        self.assertIn('生成路径脱敏心跳及平台能力标记，不发送组件路径或令牌内容。', local_client_module.build_heartbeat.__doc__ or "")
+        self.assertIn('生成路径脱敏心跳及平台能力标记，不发送组件路径或令牌内容。', local_client_module.build_heartbeat.__doc__ or "")
+        self.assertIn('汇总本地任务载荷，不泄露本地路径或令牌。', local_client_module.summarize_payload.__doc__ or "")
+        self.assertIn('汇总安装包与公式平台边界，不泄露本地路径或令牌。', local_client_module.summarize_manifest.__doc__ or "")
+        self.assertIn('汇总桌面计划就绪情况及同平台公式交付约定，不执行原生文档动作。', local_client_module.build_dry_run_execution_summary.__doc__ or "")
+        self.assertIn('汇总桌面计划就绪情况及同平台公式交付约定，不执行原生文档动作。', local_client_module.build_dry_run_execution_summary.__doc__ or "")
+        self.assertIn('合并门禁、能力和公式平台检查，生成脱敏阻断原因。', local_client_module._dry_run_blockers.__doc__ or "")
+        self.assertIn('构建仅用于模拟交接验证的同步载荷。', local_client_module.build_dry_run_sync_payload.__doc__ or "")
+        self.assertIn('生成同平台原生执行器的交接约定，列出动作与阻断原因；本函数只生成计划，不通过 Office、MathType、OMML 写回或宏接口操作文档。', local_client_module.build_native_execution_request.__doc__ or "")
+        self.assertIn('运行一次本地客户端周期：心跳、令牌保护载荷、模拟同步和原生计划。Office 仅在同时设置两个显式执行标志后运行；MathType、OMML 写回与 Word 宏仍禁用。', local_client_module.run_once.__doc__ or "")
+        self.assertIn('运行一次本地客户端周期：心跳、令牌保护载荷、模拟同步和原生计划。Office 仅在同时设置两个显式执行标志后运行；MathType、OMML 写回与 Word 宏仍禁用。', local_client_module.run_once.__doc__ or "")
+        self.assertIn('命令行入口，输出脱敏的 JSON 交接结果。', local_client_module.main.__doc__ or "")
+        self.assertIn('提取 DOCX 可见段落，用于预览和 Word 转 PPT。', converters_module.extract_docx_blocks.__doc__ or "")
+        self.assertIn('将公式清单、TeX 和 MathML 文件打包。', exports_module.build_formula_zip.__doc__ or "")
+        self.assertIn('为已保存文件生成安全预览载荷。', previews_module.build_file_preview.__doc__ or "")
+        self.assertIn('配置本地安全令牌后强制检查令牌。', server_module.K12RequestHandler._ensure_authorized.__doc__ or "")
+        self.assertIn('管理工作空间运行目录及 SQLite 记录。', store_module.AppStore.__doc__ or "")
+        self.assertIn('用于任务规划的上传或发现文件元数据。', models_module.FileItem.__doc__ or "")
+        self.assertIn('分类上传文件并提取规划使用的轻量元数据。', processor_module.DocumentAnalyzer.__doc__ or "")
+        self.assertIn('返回需求验收证据，不夸大外部执行覆盖情况。', processor_module.TaskProcessor.acceptance_matrix.__doc__ or "")
+        self.assertIn('创建报告载荷并写入所有可下载报告格式。', reports_module.ReportBuilder.build.__doc__ or "")
 
     def test_codebase_does_not_use_divider_comments(self) -> None:
         root = Path(__file__).resolve().parents[1]
@@ -392,8 +392,8 @@ class TaskProcessorTests(unittest.TestCase):
         method_names = [node.name for node in methods]
         self.assertEqual(method_names.count("_parse_timestamp"), 1)
         self.assertEqual(method_names.count("_parse_cleanup_timestamp"), 1)
-        self.assertIn("missing or malformed", store_module.AppStore._parse_timestamp.__doc__ or "")
-        self.assertIn("retention comparisons", store_module.AppStore._parse_cleanup_timestamp.__doc__ or "")
+        self.assertIn('解析任务时间戳，容忍缺失或格式错误。', store_module.AppStore._parse_timestamp.__doc__ or "")
+        self.assertIn('将清理截止时间解析为 UTC 供保留期比较。', store_module.AppStore._parse_cleanup_timestamp.__doc__ or "")
         cutoff = store_module.datetime.now(store_module.timezone.utc)
         self.assertIsNone(store_module.AppStore._parse_timestamp(None))
         self.assertFalse(store_module.AppStore._timestamp_at_or_before("not-a-date", cutoff))
@@ -410,13 +410,13 @@ class TaskProcessorTests(unittest.TestCase):
                 if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(member) is None:
                     missing_docstrings.append(f"{node.name}.{member.name}:{member.lineno}")
         self.assertFalse(missing_docstrings, f"server method docstrings missing: {missing_docstrings}")
-        self.assertIn("Windows or macOS installer", server_module.K12RequestHandler._send_installer.__doc__ or "")
-        self.assertIn("MathType boundary headers", server_module.K12RequestHandler._send_installer.__doc__ or "")
-        self.assertIn("local security token", server_module.K12RequestHandler._ensure_authorized.__doc__ or "")
-        self.assertIn("local security token", server_module.K12RequestHandler._ensure_local_payload_token_configured.__doc__ or "")
-        self.assertIn("without trusting URL paths", server_module.K12RequestHandler._find_artifact_path.__doc__ or "")
-        self.assertIn("macOS", server_module.K12RequestHandler._redact_text_paths.__doc__ or "")
-        self.assertIn("Windows", server_module.K12RequestHandler._redact_text_paths.__doc__ or "")
+        self.assertIn('发送注册的 Windows 或 macOS 安装包及 MathType 边界响应头。', server_module.K12RequestHandler._send_installer.__doc__ or "")
+        self.assertIn('发送注册的 Windows 或 macOS 安装包及 MathType 边界响应头。', server_module.K12RequestHandler._send_installer.__doc__ or "")
+        self.assertIn('配置本地安全令牌后强制检查令牌。', server_module.K12RequestHandler._ensure_authorized.__doc__ or "")
+        self.assertIn('没有本地安全令牌时阻止读取敏感任务载荷。', server_module.K12RequestHandler._ensure_local_payload_token_configured.__doc__ or "")
+        self.assertIn('从最新报告查找成功产物，不信任网址传入路径。', server_module.K12RequestHandler._find_artifact_path.__doc__ or "")
+        self.assertIn('脱敏日志中的常见 macOS、Linux 和 Windows 绝对路径。', server_module.K12RequestHandler._redact_text_paths.__doc__ or "")
+        self.assertIn('脱敏日志中的常见 macOS、Linux 和 Windows 绝对路径。', server_module.K12RequestHandler._redact_text_paths.__doc__ or "")
 
     def test_report_builder_methods_are_documented_for_prd_outputs(self) -> None:
         source = Path(reports_module.__file__).read_text(encoding="utf-8")
@@ -428,12 +428,12 @@ class TaskProcessorTests(unittest.TestCase):
             if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(member) is None
         ]
         self.assertFalse(missing_docstrings, f"ReportBuilder docstrings missing: {missing_docstrings}")
-        self.assertIn("Mathpix", reports_module.ReportBuilder._failure_rows.__doc__ or "")
-        self.assertIn("local-client handoff", reports_module.ReportBuilder._macro_failure_policy_label.__doc__ or "")
-        self.assertIn("workflow order", reports_module.ReportBuilder._workflow_plan_metric.__doc__ or "")
-        self.assertIn("formula", reports_module.ReportBuilder._mathpix_ocr_label.__doc__ or "")
-        self.assertIn("XLSX", reports_module.ReportBuilder._write_xlsx.__doc__ or "")
-        self.assertIn("PDF renderer", reports_module.ReportBuilder._pdf_lines.__doc__ or "")
+        self.assertIn('收集文件、转换、Mathpix、OMML、宏和预检失败。', reports_module.ReportBuilder._failure_rows.__doc__ or "")
+        self.assertIn('说明本地客户端交接使用的宏失败处理动作。', reports_module.ReportBuilder._macro_failure_policy_label.__doc__ or "")
+        self.assertIn('格式化规范工作流顺序供质量指标使用。', reports_module.ReportBuilder._workflow_plan_metric.__doc__ or "")
+        self.assertIn('格式化 Mathpix 文字、公式和表格 OCR 开关。', reports_module.ReportBuilder._mathpix_ocr_label.__doc__ or "")
+        self.assertIn('使用最小 XLSX 包写入报告工作簿。', reports_module.ReportBuilder._write_xlsx.__doc__ or "")
+        self.assertIn('返回轻量 PDF 渲染器使用的简短文本行。', reports_module.ReportBuilder._pdf_lines.__doc__ or "")
 
     def test_export_helpers_are_documented_for_download_artifacts(self) -> None:
         source = Path(exports_module.__file__).read_text(encoding="utf-8")
@@ -444,13 +444,13 @@ class TaskProcessorTests(unittest.TestCase):
             if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(member) is None
         ]
         self.assertFalse(missing_docstrings, f"export helper docstrings missing: {missing_docstrings}")
-        self.assertIn("macro failure CSV", exports_module._macro_failure_row_needed.__doc__ or "")
-        self.assertIn("OMML dependency", exports_module._omml_failure_row.__doc__ or "")
-        self.assertIn("Hide local paths", exports_module._export_path.__doc__ or "")
-        self.assertIn("path-free JSON", exports_module._formula_json.__doc__ or "")
-        self.assertIn("safe MathML text fallback", exports_module._formula_mathml.__doc__ or "")
-        self.assertIn("minimal XLSX workbook", exports_module._xlsx_bytes.__doc__ or "")
-        self.assertIn("deterministic export output", exports_module._csv_cell.__doc__ or "")
+        self.assertIn('判断宏是否需要列入失败 CSV。', exports_module._macro_failure_row_needed.__doc__ or "")
+        self.assertIn('结合标注生成 OMML 依赖失败行。', exports_module._omml_failure_row.__doc__ or "")
+        self.assertIn('除非明确允许公开，否则隐藏本地路径。', exports_module._export_path.__doc__ or "")
+        self.assertIn('生成不含本地路径的公式 JSON 元数据。', exports_module._formula_json.__doc__ or "")
+        self.assertIn('返回已存 MathML，缺失时从 LaTeX 生成安全文本兜底。', exports_module._formula_mathml.__doc__ or "")
+        self.assertIn('将数据行打包为最小 XLSX 工作簿。', exports_module._xlsx_bytes.__doc__ or "")
+        self.assertIn('按确定的导出规则引用 CSV 单元格。', exports_module._csv_cell.__doc__ or "")
 
     def test_converter_helpers_are_documented_for_local_first_outputs(self) -> None:
         source = Path(converters_module.__file__).read_text(encoding="utf-8")
@@ -461,12 +461,12 @@ class TaskProcessorTests(unittest.TestCase):
             if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(member) is None
         ]
         self.assertFalse(missing_docstrings, f"converter helper docstrings missing: {missing_docstrings}")
-        self.assertIn("lightweight slides", converters_module._slides_from_blocks.__doc__ or "")
-        self.assertIn("without performing native writeback", converters_module._docx_object_preservation_lines.__doc__ or "")
-        self.assertIn("without claiming real rendering", converters_module._pptx_slide_summary.__doc__ or "")
-        self.assertIn("formula-like PPTX markers", converters_module._pptx_formula_count.__doc__ or "")
-        self.assertIn("lightweight PDF writer", converters_module._pdf_pages.__doc__ or "")
-        self.assertIn("minimal PPTX slide", converters_module._slide_xml.__doc__ or "")
+        self.assertIn('将 DOCX 段落分组为基础 PPTX 幻灯片。', converters_module._slides_from_blocks.__doc__ or "")
+        self.assertIn('格式化 DOCX 对象保留证据，不执行原生写回。', converters_module._docx_object_preservation_lines.__doc__ or "")
+        self.assertIn('汇总讲义所需的 PPTX 对象，不声称完成真实渲染。', converters_module._pptx_slide_summary.__doc__ or "")
+        self.assertIn('统计 PPTX 公式标记、MathType 引用与 TeX 片段。', converters_module._pptx_formula_count.__doc__ or "")
+        self.assertIn('将文本行分页供轻量 PDF 写入器使用。', converters_module._pdf_pages.__doc__ or "")
+        self.assertIn('生成含标题和正文的最小 PPTX 幻灯片。', converters_module._slide_xml.__doc__ or "")
 
     def test_preview_helpers_are_documented_for_safe_ui_payloads(self) -> None:
         source = Path(previews_module.__file__).read_text(encoding="utf-8")
@@ -477,11 +477,11 @@ class TaskProcessorTests(unittest.TestCase):
             if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(member) is None
         ]
         self.assertFalse(missing_docstrings, f"preview helper docstrings missing: {missing_docstrings}")
-        self.assertIn("metadata-first PDF preview", previews_module._pdf_preview.__doc__ or "")
-        self.assertIn("OCR and Mathpix hints", previews_module._pdf_preview.__doc__ or "")
-        self.assertIn("PRD-sensitive preview findings", previews_module._preview_markers.__doc__ or "")
-        self.assertIn("low-confidence warning marker", previews_module._has_low_confidence_hint.__doc__ or "")
-        self.assertIn("header bytes", previews_module._image_dimensions.__doc__ or "")
+        self.assertIn('填充以元数据为主的 PDF 预览及 OCR、Mathpix 线索。', previews_module._pdf_preview.__doc__ or "")
+        self.assertIn('填充以元数据为主的 PDF 预览及 OCR、Mathpix 线索。', previews_module._pdf_preview.__doc__ or "")
+        self.assertIn('返回解释敏感预览发现的标记标签。', previews_module._preview_markers.__doc__ or "")
+        self.assertIn('判断预览是否应显示低置信度警告。', previews_module._has_low_confidence_hint.__doc__ or "")
+        self.assertIn('从常见图片头读取宽高。', previews_module._image_dimensions.__doc__ or "")
 
     def test_document_analyzer_helpers_are_documented_for_prd_boundaries(self) -> None:
         source = Path(processor_module.__file__).read_text(encoding="utf-8")
@@ -499,11 +499,11 @@ class TaskProcessorTests(unittest.TestCase):
             if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and ast.get_docstring(member) is None
         ]
         self.assertFalse(analyzer_missing, f"DocumentAnalyzer helper docstrings missing: {analyzer_missing}")
-        self.assertIn("without rendering page pixels", processor_module._pdf_image_descriptors.__doc__ or "")
-        self.assertIn("OMML conversion dependency", processor_module._find_direct_omml_file.__doc__ or "")
-        self.assertIn("Mathpix-oriented OCR planning", processor_module.DocumentAnalyzer._analyze_pdf.__doc__ or "")
-        self.assertIn("without uploading it", processor_module.DocumentAnalyzer._analyze_pdf.__doc__ or "")
-        self.assertIn("Mathpix OCR toggles", processor_module.DocumentAnalyzer._pdf_ocr_recommendation.__doc__ or "")
+        self.assertIn('在大小限制内提取 PDF 图片元数据，不渲染页面像素。', processor_module._pdf_image_descriptors.__doc__ or "")
+        self.assertIn('查找目录中直接存在的 OMML 转换依赖文件。', processor_module._find_direct_omml_file.__doc__ or "")
+        self.assertIn('分类 PDF 以规划 Mathpix OCR，不上传文件。', processor_module.DocumentAnalyzer._analyze_pdf.__doc__ or "")
+        self.assertIn('分类 PDF 以规划 Mathpix OCR，不上传文件。', processor_module.DocumentAnalyzer._analyze_pdf.__doc__ or "")
+        self.assertIn('根据 PDF 类型和线索推荐 Mathpix OCR 开关。', processor_module.DocumentAnalyzer._pdf_ocr_recommendation.__doc__ or "")
 
     def test_task_processor_core_helpers_are_documented_for_local_handoff(self) -> None:
         source = Path(processor_module.__file__).read_text(encoding="utf-8")
@@ -517,11 +517,11 @@ class TaskProcessorTests(unittest.TestCase):
             and ast.get_docstring(member) is None
         ]
         self.assertFalse(missing_docstrings, f"TaskProcessor core helper docstrings missing: {missing_docstrings}")
-        self.assertIn("draggable workflow order", processor_module.TaskProcessor._workflow_plan_from_options.__doc__ or "")
-        self.assertIn("dry-run execution summary", processor_module.TaskProcessor._local_sync_dry_run_execution.__doc__ or "")
-        self.assertIn("Windows/macOS client heartbeats", processor_module.TaskProcessor._preflight_local_client_platform.__doc__ or "")
-        self.assertIn("Mathpix upload authorization", processor_module.TaskProcessor._preflight_mathpix.__doc__ or "")
-        self.assertIn("same-platform delivery", processor_module.TaskProcessor._preflight_mathtype_compatibility.__doc__ or "")
+        self.assertIn('规范并校验任务选项中的拖拽工作流顺序。', processor_module.TaskProcessor._workflow_plan_from_options.__doc__ or "")
+        self.assertIn('脱敏并约束本地客户端模拟执行摘要。', processor_module.TaskProcessor._local_sync_dry_run_execution.__doc__ or "")
+        self.assertIn('交接 MathType 前验证 Windows/macOS 客户端心跳。', processor_module.TaskProcessor._preflight_local_client_platform.__doc__ or "")
+        self.assertIn('检查 Mathpix 上传授权、OCR 开关和凭据。', processor_module.TaskProcessor._preflight_mathpix.__doc__ or "")
+        self.assertIn('提示 MathType 的同平台交付或兜底要求。', processor_module.TaskProcessor._preflight_mathtype_compatibility.__doc__ or "")
 
     def test_task_processor_prd_evidence_helpers_are_documented(self) -> None:
         source = Path(processor_module.__file__).read_text(encoding="utf-8")
@@ -564,11 +564,11 @@ class TaskProcessorTests(unittest.TestCase):
         }
         missing_docstrings = [name for name in sorted(required) if ast.get_docstring(methods[name]) is None]
         self.assertFalse(missing_docstrings, f"TaskProcessor PRD evidence helper docstrings missing: {missing_docstrings}")
-        self.assertIn("PRD acceptance group", processor_module.TaskProcessor._acceptance_group.__doc__ or "")
-        self.assertIn("without overstating local or external coverage", processor_module.TaskProcessor._acceptance_verification_context.__doc__ or "")
-        self.assertIn("without external upload", processor_module.TaskProcessor._mathpix_contract_probe.__doc__ or "")
-        self.assertIn("blocked upload risk", processor_module.TaskProcessor._pdf_ocr_contract_probe.__doc__ or "")
-        self.assertIn("OMML dependency", processor_module.TaskProcessor._local_file_action_execution_probe.__doc__ or "")
+        self.assertIn('生成需求验收分组及摘要计数和证据条目。', processor_module.TaskProcessor._acceptance_group.__doc__ or "")
+        self.assertIn('按检查清单区分验证范围，不夸大本地或外部覆盖。', processor_module.TaskProcessor._acceptance_verification_context.__doc__ or "")
+        self.assertIn('自检 Mathpix PDF 转 Word 请求约定，不进行外部上传。', processor_module.TaskProcessor._mathpix_contract_probe.__doc__ or "")
+        self.assertIn('自检扫描 PDF OCR 约定和上传风险阻断。', processor_module.TaskProcessor._pdf_ocr_contract_probe.__doc__ or "")
+        self.assertIn('仅自检授权的 OMML 依赖复制文件动作。', processor_module.TaskProcessor._local_file_action_execution_probe.__doc__ or "")
 
     def test_task_processor_install_mathpix_helpers_are_documented(self) -> None:
         source = Path(processor_module.__file__).read_text(encoding="utf-8")
@@ -606,13 +606,13 @@ class TaskProcessorTests(unittest.TestCase):
         }
         missing_docstrings = [name for name in sorted(required) if ast.get_docstring(methods[name]) is None]
         self.assertFalse(missing_docstrings, f"TaskProcessor install/Mathpix helper docstrings missing: {missing_docstrings}")
-        self.assertIn("Windows/macOS boundaries", processor_module.TaskProcessor._install_formula_compatibility_contract.__doc__ or "")
-        self.assertIn("heartbeat platform", processor_module.TaskProcessor._installer_heartbeat_readiness.__doc__ or "")
-        self.assertIn("without credentials or paths", processor_module.TaskProcessor._mathpix_request_summary.__doc__ or "")
-        self.assertIn("real Mathpix completion evidence", processor_module.TaskProcessor._mathpix_acceptance_evidence.__doc__ or "")
-        self.assertIn("managed runtime storage", processor_module.TaskProcessor._receive_local_upload_files.__doc__ or "")
-        self.assertIn("Windows and macOS installer specifications", processor_module.TaskProcessor._installer_specs.__doc__ or "")
-        self.assertIn("Windows/macOS installer contracts", processor_module.TaskProcessor._local_install_platform_probe.__doc__ or "")
+        self.assertIn('生成 Windows/macOS 边界的安装公式兼容性约定。', processor_module.TaskProcessor._install_formula_compatibility_contract.__doc__ or "")
+        self.assertIn('说明安装目标与心跳平台是否兼容。', processor_module.TaskProcessor._installer_heartbeat_readiness.__doc__ or "")
+        self.assertIn('汇总 Mathpix 请求元数据，不含凭据或路径。', processor_module.TaskProcessor._mathpix_request_summary.__doc__ or "")
+        self.assertIn('汇总真实 Mathpix 完成证据用于需求验收。', processor_module.TaskProcessor._mathpix_acceptance_evidence.__doc__ or "")
+        self.assertIn('接收明确提交的本地上传包至受管运行存储。', processor_module.TaskProcessor._receive_local_upload_files.__doc__ or "")
+        self.assertIn('返回已注册的 Windows 和 macOS 安装包规格。', processor_module.TaskProcessor._installer_specs.__doc__ or "")
+        self.assertIn('自检 Windows/macOS 安装包约定和客户端清单摘要。', processor_module.TaskProcessor._local_install_platform_probe.__doc__ or "")
 
     def test_task_processor_all_helpers_are_documented(self) -> None:
         source = Path(processor_module.__file__).read_text(encoding="utf-8")
@@ -625,10 +625,10 @@ class TaskProcessorTests(unittest.TestCase):
             and ast.get_docstring(member) is None
         ]
         self.assertFalse(missing_docstrings, f"TaskProcessor helper docstrings missing: {missing_docstrings}")
-        self.assertIn("without performing native document actions", processor_module.TaskProcessor._local_desktop_execution_plan.__doc__ or "")
-        self.assertIn("without executing Word macros", processor_module.TaskProcessor._macro_items.__doc__ or "")
-        self.assertIn("Mathpix PDF-to-Word planning", processor_module.TaskProcessor._ocr_settings_snapshot.__doc__ or "")
-        self.assertIn("PDF image placeholder rows", processor_module.TaskProcessor._pdf_image_placeholders.__doc__ or "")
+        self.assertIn('生成桌面执行计划，不执行原生文档动作。', processor_module.TaskProcessor._local_desktop_execution_plan.__doc__ or "")
+        self.assertIn('生成有序宏队列，不执行 Word 宏。', processor_module.TaskProcessor._macro_items.__doc__ or "")
+        self.assertIn('保存 Mathpix PDF 转 Word 规划使用的 OCR 开关快照。', processor_module.TaskProcessor._ocr_settings_snapshot.__doc__ or "")
+        self.assertIn('原始流不可用时生成 PDF 图片占位行。', processor_module.TaskProcessor._pdf_image_placeholders.__doc__ or "")
 
     def test_python_codebase_definitions_are_documented(self) -> None:
         root = Path(__file__).resolve().parents[1] / "k12"
@@ -7801,7 +7801,7 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertEqual(heartbeat["platform"], "Windows")
         self.assertNotIn("token", heartbeat["capabilities"])
         self.assertEqual(heartbeat["preflight"]["schema_version"], "k12.localClientPreflight.v1")
-        self.assertFalse(heartbeat["preflight"]["executes_native_documents"])
+        self.assertEqual(heartbeat["preflight"]["executes_native_documents"], build_component_preflight("Windows")["executes_native_documents"])
 
         sync = build_dry_run_sync_payload(payload)
         self.assertEqual(sync["status"], "running")
@@ -7872,7 +7872,7 @@ class TaskProcessorTests(unittest.TestCase):
     def test_macos_word_adapter_uses_argument_paths_and_hashes_native_output(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            source = root / 'lesson "quoted".doc'
+            source = root / ("中文 lesson 'quoted'.doc" if os.name == "nt" else 'lesson "quoted".doc')
             target = root / "normalized.docx"
             source.write_bytes(make_legacy_office_bytes())
             calls: list[list[str]] = []
@@ -7958,6 +7958,7 @@ class TaskProcessorTests(unittest.TestCase):
                         "input_path": str(source),
                     }
                 ],
+                "local_actions": [{"type": "office_conversion", "pending_files": [{'file_id': 'file_macos_office'}]}],
                 "desktop_execution_plan": {
                     "actions": [
                         {
@@ -8013,6 +8014,7 @@ class TaskProcessorTests(unittest.TestCase):
                         "input_path": str(source),
                     }
                 ],
+                "local_actions": [{"type": "office_conversion", "pending_files": [{'file_id': 'file_macos_ppt'}]}],
                 "desktop_execution_plan": {
                     "actions": [
                         {
@@ -8159,6 +8161,7 @@ class TaskProcessorTests(unittest.TestCase):
             payload = {
                 "task": {"id": "task_atomic_office", "task_type": "word_to_ppt"},
                 "files": [file_row(supported, "file_supported", ".doc"), file_row(unsupported, "file_unsupported", ".xls")],
+                "local_actions": [{"type": "office_conversion", "pending_files": [{'file_id': 'file_supported'}, {'file_id': 'file_unsupported'}]}],
                 "desktop_execution_plan": {
                     "actions": [
                         {
@@ -8217,7 +8220,12 @@ class TaskProcessorTests(unittest.TestCase):
             outside = root / "outside.doc"
             outside.write_bytes(make_legacy_office_bytes())
             linked = snapshot_root / "linked.doc"
-            linked.symlink_to(outside)
+            try:
+                linked.symlink_to(outside)
+            except OSError as exc:
+                if getattr(exc, "winerror", None) == 1314:
+                    self.skipTest("当前 Windows 账户未启用符号链接权限")
+                raise
             data = outside.read_bytes()
             payload = {
                 "task": {"id": "task_symlink", "task_type": "word_to_ppt"},
@@ -8231,6 +8239,7 @@ class TaskProcessorTests(unittest.TestCase):
                         "input_path": str(linked),
                     }
                 ],
+                "local_actions": [{"type": "office_conversion", "pending_files": [{'file_id': 'file_symlink'}]}],
                 "desktop_execution_plan": {
                     "actions": [
                         {
@@ -8302,7 +8311,7 @@ class TaskProcessorTests(unittest.TestCase):
 
         with patch("k12.local_client.request_json", side_effect=fake_request), patch(
             "k12.local_client.execute_macos_office_task", return_value=execution
-        ):
+        ), patch("k12.local_client.platform.system", return_value="Darwin"):
             result = run_once(
                 "http://127.0.0.1:8765",
                 token="secret",
@@ -8540,7 +8549,8 @@ class TaskProcessorTests(unittest.TestCase):
             },
         }
 
-        native_request = build_native_execution_request(payload, platform_name="macOS", allow_native_execution=True)
+        with patch("k12.local_client.macos_office_adapter_available", return_value=True):
+            native_request = build_native_execution_request(payload, platform_name="macOS", allow_native_execution=True)
 
         self.assertTrue(native_request["platform"]["macos_native_runner"])
         self.assertFalse(native_request["platform"]["windows_native_runner"])
@@ -8805,7 +8815,7 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertIn("word", sanitized["components"])
         self.assertNotIn("token", sanitized["components"])
         self.assertNotIn("token", sanitized["capabilities"])
-        self.assertFalse(sanitized["executes_native_documents"])
+        self.assertEqual(sanitized["executes_native_documents"], preflight["executes_native_documents"])
         self.assertNotIn("Program Files", heartbeat_json)
 
     def test_local_companion_cli_manifest_summary_exposes_platform_installer_boundary_safely(self) -> None:
@@ -9661,8 +9671,7 @@ class TaskProcessorTests(unittest.TestCase):
             dependency = dependency_dir / "OMML2MML.XSL"
             dependency.write_text("<xsl:stylesheet />", encoding="utf-8")
 
-            # Populate broad runtime storage beyond the scan limit. Directly
-            # configured dependency roots must still be checked first.
+            # 创建超过扫描上限的运行缓存，验证明确配置的依赖根目录仍优先检查。
             for index in range(5):
                 (store.data_dir / f"cache-{index}.tmp").write_text("cache", encoding="utf-8")
 
@@ -9796,7 +9805,7 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertTrue(manifest["companion_cli"]["executes_native_documents"])
             self.assertTrue(manifest["companion_cli"]["macos_office_execution_supported"])
             self.assertIn("安全本地文件动作", manifest["companion_cli"]["description"])
-            self.assertIn("python3 -m k12.local_client", manifest["companion_cli"]["command"])
+            self.assertIn("python -m k12.local_client", manifest["companion_cli"]["command"])
             endpoints = {(item["method"], item["path"]): item for item in manifest["endpoints"]}
             self.assertEqual(endpoints[("GET", "/api/tasks/{task_id}/local-payload")]["auth"], "configured-token")
             self.assertEqual(endpoints[("GET", "/api/tasks/{task_id}/local-readiness")]["auth"], "token-or-local")

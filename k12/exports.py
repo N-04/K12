@@ -1,9 +1,4 @@
-"""Export helpers for formula, image, macro, and failure report artifacts.
-
-The PRD asks for downloadable reports rather than opaque task logs. This module
-builds deterministic CSV, JSON, TeX, MathML, and XLSX-compatible packages from
-stored report data without reaching back into local source paths.
-"""
+"""生成公式、图片、宏和失败记录的可下载报告。仅从已保存的报告数据构建 CSV、JSON、TeX、MathML 和 XLSX 文件，不回读本地源文件路径。"""
 
 from __future__ import annotations
 
@@ -16,7 +11,7 @@ from typing import Any
 
 
 def build_formula_zip(report: dict[str, Any], annotations: list[dict[str, Any]] | None = None) -> bytes:
-    """Package formulas as manifest data plus TeX and MathML files."""
+    """将公式清单、TeX 和 MathML 文件打包。"""
     formulas = list(report.get("analysis", {}).get("formulas", []))
     files_by_id = {file.get("id"): file.get("file_name", "") for file in report.get("files", [])}
     annotations_by_formula = {item.get("formula_id"): item for item in annotations or []}
@@ -34,7 +29,7 @@ def build_formula_zip(report: dict[str, Any], annotations: list[dict[str, Any]] 
 
 
 def build_formula_xlsx(report: dict[str, Any], annotations: list[dict[str, Any]] | None = None) -> bytes:
-    """Build a spreadsheet-compatible formula report from normalized items."""
+    """根据规范化公式记录生成电子表格报告。"""
     formulas = list(report.get("analysis", {}).get("formulas", []))
     files_by_id = {file.get("id"): file.get("file_name", "") for file in report.get("files", [])}
     annotations_by_formula = {item.get("formula_id"): item for item in annotations or []}
@@ -94,7 +89,7 @@ def build_formula_xlsx(report: dict[str, Any], annotations: list[dict[str, Any]]
 
 
 def build_image_manifest_xlsx(report: dict[str, Any], annotations: list[dict[str, Any]] | None = None) -> bytes:
-    """Build a spreadsheet-compatible manifest for extracted small images."""
+    """生成提取的小图片清单工作簿。"""
     images = list(report.get("analysis", {}).get("smallImages", []))
     files_by_id = {file.get("id"): file.get("file_name", "") for file in report.get("files", [])}
     annotations_by_image = {item.get("image_id"): item for item in annotations or []}
@@ -168,7 +163,7 @@ def build_image_manifest_xlsx(report: dict[str, Any], annotations: list[dict[str
 
 
 def build_omml_failure_csv(report: dict[str, Any], annotations: list[dict[str, Any]] | None = None, expose_paths: bool = False) -> str:
-    """Build the OMML failure CSV while honoring the path exposure policy."""
+    """按路径公开策略生成 OMML 失败 CSV。"""
     files = report.get("files", [])
     files_by_id = {file.get("id"): file for file in files}
     annotations_by_dependency = {item.get("dependency_id"): item for item in annotations or []}
@@ -223,7 +218,7 @@ def build_omml_failure_csv(report: dict[str, Any], annotations: list[dict[str, A
 
 
 def build_macro_failure_csv(report: dict[str, Any], expose_paths: bool = False) -> str:
-    """Build the macro failure CSV without exposing backup paths by default."""
+    """生成宏失败 CSV，默认隐藏备份路径。"""
     files_by_id = {file.get("id"): file for file in report.get("files", [])}
     rows = [
         _macro_failure_row(report, macro, files_by_id.get(macro.get("file_id"), {}), expose_paths)
@@ -253,12 +248,12 @@ def build_macro_failure_csv(report: dict[str, Any], expose_paths: bool = False) 
 
 
 def _macro_failure_row_needed(macro: dict[str, Any]) -> bool:
-    """Return whether one macro should appear in the macro failure CSV."""
+    """判断宏是否需要列入失败 CSV。"""
     return macro.get("execute_status") in {"失败", "未授权", "已禁用"}
 
 
 def _macro_failure_row(report: dict[str, Any], macro: dict[str, Any], file: dict[str, Any], expose_paths: bool) -> dict[str, Any]:
-    """Build one macro failure export row with optional local path redaction."""
+    """生成宏失败导出行，可脱敏本地路径。"""
     policy = macro.get("failure_policy") or {}
     return {
         "report_id": report.get("id", ""),
@@ -280,7 +275,7 @@ def _macro_failure_row(report: dict[str, Any], macro: dict[str, Any], file: dict
 
 
 def _macro_failure_recommendation(macro: dict[str, Any]) -> str:
-    """Return the next action for a failed, blocked, or disabled macro."""
+    """给出失败、阻断或禁用宏的下一步建议。"""
     status = str(macro.get("execute_status") or "")
     if status == "未授权":
         return "检查宏来源授权、白名单和当前用户宏执行权限后重试"
@@ -296,7 +291,7 @@ def _macro_failure_recommendation(macro: dict[str, Any]) -> str:
 
 
 def _omml_failure_row_needed(dependency: dict[str, Any], annotation: dict[str, Any]) -> bool:
-    """Return whether one OMML dependency or annotation needs export attention."""
+    """判断 OMML 依赖或标注是否需要关注。"""
     return (
         dependency.get("found_status") == "未找到"
         or dependency.get("copy_status") == "失败"
@@ -311,7 +306,7 @@ def _omml_failure_row(
     annotation: dict[str, Any],
     expose_paths: bool,
 ) -> dict[str, Any]:
-    """Build one OMML dependency failure row with annotation context."""
+    """结合标注生成 OMML 依赖失败行。"""
     message = dependency.get("error_message") or annotation.get("note") or f"检索：{dependency.get('found_status', '')}，复制：{dependency.get('copy_status', '')}"
     recommendation = _omml_failure_recommendation(dependency, annotation)
     return {
@@ -336,7 +331,7 @@ def _omml_failure_row(
 
 
 def _omml_failure_recommendation(dependency: dict[str, Any], annotation: dict[str, Any]) -> str:
-    """Return the next action for OMML lookup, copy, or conversion failures."""
+    """给出 OMML 查找、复制或转换失败的处理建议。"""
     if annotation.get("retry_conversion"):
         return "重新执行 OMML 转 MathType，并保留原 OMML 兜底"
     if annotation.get("manual_omml_path"):
@@ -349,7 +344,7 @@ def _omml_failure_recommendation(dependency: dict[str, Any], annotation: dict[st
 
 
 def _dict_csv(rows: list[dict[str, Any]], fieldnames: list[str]) -> str:
-    """Render dictionaries to CSV using an explicit field order."""
+    """按明确字段顺序将字典渲染为 CSV。"""
     lines = [",".join(fieldnames)]
     for row in rows:
         lines.append(",".join(_csv_cell(row.get(name, "")) for name in fieldnames))
@@ -357,7 +352,7 @@ def _dict_csv(rows: list[dict[str, Any]], fieldnames: list[str]) -> str:
 
 
 def _export_path(value: object, expose_paths: bool) -> str:
-    """Hide local paths unless the caller explicitly allows path exposure."""
+    """除非明确允许公开，否则隐藏本地路径。"""
     text = str(value or "")
     if not text or expose_paths:
         return text
@@ -366,7 +361,7 @@ def _export_path(value: object, expose_paths: bool) -> str:
 
 
 def _formula_json(report: dict[str, Any], formulas: list[dict[str, Any]], files_by_id: dict[str, str], annotations: dict[str, dict[str, Any]]) -> str:
-    """Render formula export metadata as path-free JSON."""
+    """生成不含本地路径的公式 JSON 元数据。"""
     items: list[dict[str, Any]] = []
     for formula in formulas:
         annotation = annotations.get(formula.get("id"), {})
@@ -399,7 +394,7 @@ def _formula_json(report: dict[str, Any], formulas: list[dict[str, Any]], files_
 
 
 def _formula_manifest(formulas: list[dict[str, Any]], files_by_id: dict[str, str], annotations: dict[str, dict[str, Any]]) -> str:
-    """Render formula export metadata as a manifest CSV."""
+    """生成公式导出清单 CSV。"""
     rows = ["formula_id,file_name,page,position,position_status,position_issue,source_type,confidence,status,format_status,latex,mathml,retry_recognition,recognition_status,recognition_next_step"]
     for formula in formulas:
         annotation = annotations.get(formula.get("id"), {})
@@ -429,7 +424,7 @@ def _formula_manifest(formulas: list[dict[str, Any]], files_by_id: dict[str, str
 
 
 def _formula_tex_document(formulas: list[dict[str, Any]], files_by_id: dict[str, str], annotations: dict[str, dict[str, Any]]) -> str:
-    """Combine all formulas into one TeX document for report download."""
+    """将全部公式合并为可下载的 TeX 文档。"""
     lines = ["% K12 formula export", ""]
     for formula in formulas:
         lines.append(_formula_tex_item(formula, files_by_id, annotations).rstrip())
@@ -438,7 +433,7 @@ def _formula_tex_document(formulas: list[dict[str, Any]], files_by_id: dict[str,
 
 
 def _formula_tex_item(formula: dict[str, Any], files_by_id: dict[str, str], annotations: dict[str, dict[str, Any]]) -> str:
-    """Render one formula as a TeX display block with audit metadata."""
+    """将单个公式与审计信息渲染为 TeX 展示块。"""
     annotation = annotations.get(formula.get("id"), {})
     source_file = files_by_id.get(formula.get("file_id"), formula.get("file_id", ""))
     status = annotation.get("status") or formula.get("status", "")
@@ -452,7 +447,7 @@ def _formula_tex_item(formula: dict[str, Any], files_by_id: dict[str, str], anno
 
 
 def _formula_mml_document(formulas: list[dict[str, Any]], files_by_id: dict[str, str], annotations: dict[str, dict[str, Any]]) -> str:
-    """Combine all formulas into one XML-style MathML export document."""
+    """将全部公式合并为 MathML 导出文档。"""
     rows = ["<?xml version=\"1.0\" encoding=\"UTF-8\"?>", "<formulas>"]
     for formula in formulas:
         annotation = annotations.get(formula.get("id"), {})
@@ -474,7 +469,7 @@ def _formula_mml_document(formulas: list[dict[str, Any]], files_by_id: dict[str,
 
 
 def _formula_mathml(formula: dict[str, Any], annotations: dict[str, dict[str, Any]]) -> str:
-    """Return stored MathML or a safe MathML text fallback from LaTeX."""
+    """返回已存 MathML，缺失时从 LaTeX 生成安全文本兜底。"""
     annotation = annotations.get(formula.get("id"), {})
     mathml = annotation.get("mathml") or formula.get("mathml") or ""
     if mathml.strip():
@@ -484,14 +479,14 @@ def _formula_mathml(formula: dict[str, Any], annotations: dict[str, dict[str, An
 
 
 def _formula_file_stem(index: int, formula: dict[str, Any]) -> str:
-    """Create a stable safe filename stem for one exported formula."""
+    """为导出公式生成稳定安全的文件名主体。"""
     raw = str(formula.get("id") or f"formula-{index}")
     safe = "".join(char if char.isalnum() or char in {"-", "_"} else "-" for char in raw)
     return f"{index:03d}-{safe[:80]}"
 
 
 def _small_image_kind(image: dict[str, Any]) -> str:
-    """Classify a small image for manifest and workbook exports."""
+    """对小图片分类供清单和工作簿导出使用。"""
     if image.get("is_formula_like"):
         return "公式"
     if image.get("is_qrcode_like"):
@@ -504,7 +499,7 @@ def _small_image_kind(image: dict[str, Any]) -> str:
 
 
 def _xlsx_bytes(rows: list[list[Any]], sheet_name: str) -> bytes:
-    """Package rows into a minimal XLSX workbook."""
+    """将数据行打包为最小 XLSX 工作簿。"""
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("[Content_Types].xml", _xlsx_content_types())
@@ -516,7 +511,7 @@ def _xlsx_bytes(rows: list[list[Any]], sheet_name: str) -> bytes:
 
 
 def _xlsx_sheet(rows: list[list[Any]]) -> str:
-    """Build worksheet XML with inline string cells."""
+    """生成使用内联字符串单元格的工作表 XML。"""
     row_xml = []
     for row_index, row in enumerate(rows, start=1):
         cells = []
@@ -529,7 +524,7 @@ def _xlsx_sheet(rows: list[list[Any]]) -> str:
 
 
 def _column_name(index: int) -> str:
-    """Convert a 1-based column index to an Excel column name."""
+    """将从 1 开始的列序号转为 Excel 列名。"""
     name = ""
     while index:
         index, remainder = divmod(index - 1, 26)
@@ -538,31 +533,31 @@ def _column_name(index: int) -> str:
 
 
 def _xlsx_content_types() -> str:
-    """Return the content-types XML for the generated XLSX package."""
+    """返回生成的 XLSX 包内容类型 XML。"""
     return """<?xml version="1.0" encoding="UTF-8"?>
 <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/></Types>"""
 
 
 def _xlsx_package_rels() -> str:
-    """Return the package relationships XML for the workbook entry."""
+    """返回指向工作簿入口的包关系 XML。"""
     return """<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"""
 
 
 def _xlsx_workbook(sheet_name: str) -> str:
-    """Return workbook XML with a safe single-sheet name."""
+    """返回含安全工作表名称的工作簿 XML。"""
     safe_name = html.escape(sheet_name[:31] or "Sheet1", quote=True)
     return f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="{safe_name}" sheetId="1" r:id="rId1"/></sheets></workbook>"""
 
 
 def _xlsx_workbook_rels() -> str:
-    """Return workbook relationships XML for the single worksheet."""
+    """返回工作簿指向单工作表的关系 XML。"""
     return """<?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"""
 
 
 def _csv_cell(value: object) -> str:
-    """Quote one CSV cell for deterministic export output."""
+    """按确定的导出规则引用 CSV 单元格。"""
     text = str(value).replace('"', '""')
     return f'"{text}"'

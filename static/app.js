@@ -4094,6 +4094,7 @@ function renderMacros() {
             <div class="row-actions">
               <button class="mini-button macro-detail" data-id="${macro.id}">详情</button>
               <button class="mini-button macro-add" data-id="${macro.id}" ${selected ? "disabled" : ""}>加入</button>
+              ${macro.source_id ? `<button class="mini-button macro-source-delete" data-source="${escapeHtml(macro.source_id)}">删除模块</button>` : ""}
             </div>
           </div>`;
         })
@@ -4123,6 +4124,10 @@ function renderMacroDetail() {
     ["执行位置", macro.local_only ? "本地客户端" : "网页编排"],
     ["当前状态", selected ? "已加入执行顺序" : "未加入"],
   ];
+  if (macro.source_id) {
+    rows.push(["源文件", macro.source_file], ["模块", macro.module_name || "未指定"],
+      ["声明行号", macro.source_line], ["源文件 SHA-256", macro.source_sha256]);
+  }
   target.innerHTML = `<article class="macro-detail-card">
     <div class="object-title">
       <strong>${escapeHtml(macro.macro_name)}</strong>
@@ -5691,6 +5696,23 @@ function bindEvents() {
   $("#pptPreviewSelectedButton")?.addEventListener("click", previewSelectedPpt);
   $("#pptExportWordButton")?.addEventListener("click", startPptToWord);
   $("#macroSearch").addEventListener("input", renderMacros);
+  $("#macroSourceImportButton").addEventListener("click", () => $("#macroSourceImport").click());
+  $("#macroSourceImport").addEventListener("change", async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    try {
+      if (file.size > 2_000_000) throw new Error("VBA 源文件不能超过 2 MB");
+      const source = new TextDecoder("utf-8", { fatal: true }).decode(await file.arrayBuffer());
+      await api("/api/macros/import", { method: "POST", body: JSON.stringify({ file_name: file.name, source }) });
+      state.macros = (await api("/api/macros")).macros;
+      renderMacros();
+      toast("已导入宏声明；原生执行仍需本地客户端支持");
+    } catch (error) {
+      toast(error.message);
+    } finally {
+      event.target.value = "";
+    }
+  });
   $("#macroSourceFilter").addEventListener("change", renderMacros);
   $("#macroPurposeFilter").addEventListener("change", renderMacros);
   $("#macroRecentFilter").addEventListener("change", renderMacros);
@@ -6090,6 +6112,18 @@ function bindEvents() {
       state.activeMacroId = button.dataset.id;
       renderMacros();
       renderMacroDetail();
+    }
+    if (button.matches(".macro-source-delete")) {
+      try {
+        await api(`/api/macros/sources/${encodeURIComponent(button.dataset.source)}`, { method: "DELETE" });
+        state.macros = (await api("/api/macros")).macros;
+        state.macroSequence = state.macroSequence.filter((id) => state.macros.some((macro) => macro.id === id));
+        renderMacros();
+        renderMacroDetail();
+        toast("已删除导入模块及其宏声明");
+      } catch (error) {
+        toast(error.message);
+      }
     }
     if (button.matches(".macro-add")) {
       state.activeMacroId = button.dataset.id;

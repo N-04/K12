@@ -8,6 +8,10 @@ from xml.etree import ElementTree as ET
 from .ooxml import parse_compatible_xml
 
 WORD = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+PARAGRAPH_ALIGNMENTS = {
+    "left": "l", "center": "ctr", "right": "r", "both": "just",
+    "distribute": "dist", "thaiDistribute": "thaiDist",
+}
 UNDERLINES = {
     "none": "none", "single": "sng", "words": "words",
     "double": "dbl", "thick": "heavy", "dotted": "dotted",
@@ -31,6 +35,16 @@ def theme_language_script(language: str) -> str | None:
             return "Hans"
         return None
     return {"ja": "Jpan", "ko": "Hang", "en": "Latn"}.get(parts[0])
+
+
+def apply_paragraph_properties(style: dict, properties: ET.Element | None) -> None:
+    """读取段落对齐；无法表达的对齐方式清除继承值。"""
+    alignment = properties.find("{*}jc") if properties is not None else None
+    if alignment is not None:
+        style.pop("alignment", None)
+        value = alignment.get(WORD + "val")
+        if value in PARAGRAPH_ALIGNMENTS:
+            style["alignment"] = value
 
 
 def apply_run_properties(style: dict, properties: ET.Element | None, toggle: bool = False) -> None:
@@ -105,6 +119,7 @@ class WordTextStyles:
         self.theme_languages = settings.find("{*}themeFontLang") if settings is not None else None
         self.defaults = {}
         if root is not None:
+            apply_paragraph_properties(self.defaults, root.find("{*}docDefaults/{*}pPrDefault/{*}pPr"))
             apply_run_properties(self.defaults, root.find("{*}docDefaults/{*}rPrDefault/{*}rPr"))
         self.default_ids = {node.get(WORD + "type"): key for key, node in self.styles.items()
                             if node.get(WORD + "default") in {"1", "true", "on"}}
@@ -127,7 +142,7 @@ class WordTextStyles:
                 parts[kind] = parse_compatible_xml(archive.read(target))
         return cls(styles, parts.get("theme"), parts.get("settings"))
 
-    def theme_font(self, reference: str) -> str | None:
+    def theme_font(self, reference: str, language: str | None = None) -> str | None:
         """按主题语言选择补充字体，缺失时读取区域字体定义。"""
         match = re.fullmatch(r"(major|minor)(Ascii|HAnsi|EastAsia)", reference)
         if self.theme is None or not match:
@@ -136,7 +151,8 @@ class WordTextStyles:
         collection = self.theme.find("{*}themeElements/{*}fontScheme/{*}" + group + "Font")
         if collection is None:
             return None
-        language = self.theme_languages.get(WORD + ("eastAsia" if category == "EastAsia" else "val"), "") if self.theme_languages is not None else ""
+        if language is None:
+            language = self.theme_languages.get(WORD + ("eastAsia" if category == "EastAsia" else "val"), "") if self.theme_languages is not None else ""
         script = theme_language_script(language)
         if script:
             for font in collection.findall("{*}font"):
@@ -190,7 +206,10 @@ class WordTextStyles:
                                 ("character", run.find("{*}rPr/{*}rStyle"))):
             style_id = reference.get(WORD + "val") if reference is not None else self.default_ids.get(kind)
             for node in self.chain(style_id, kind):
+                if kind == "paragraph":
+                    apply_paragraph_properties(result, node.find("{*}pPr"))
                 apply_run_properties(result, node.find("{*}rPr"), toggle=True)
+        apply_paragraph_properties(result, paragraph.find("{*}pPr"))
         apply_run_properties(result, run.find("{*}rPr"))
         for key, warning in (("color", "theme_color_unresolved"), ("underline_color", "underline_color_unresolved")):
             reference = result.pop(key + "_theme", None)

@@ -206,8 +206,8 @@ class WordTableTests(unittest.TestCase):
         from k12.converters import build_docx_from_slides
         with tempfile.TemporaryDirectory() as tmp:
             word, ppt, result = [Path(tmp) / name for name in ["source.docx", "table.pptx", "result.docx"]]
-            alignments = [[["center", "right", "both"]]]
-            build_docx([{"table": [["居中\n右对齐\n两端对齐"]], "cell_alignments": alignments}], word)
+            alignments = [[["center", "right", "both", "distribute", "thaiDistribute"]]]
+            build_docx([{"table": [["居中\n右对齐\n两端对齐\n中文分散\n泰文分散"]], "cell_alignments": alignments}], word)
             blocks = extract_docx_blocks(word)
             self.assertEqual(blocks[0]["cell_alignments"], alignments)
             build_pptx_from_docx(blocks, ppt)

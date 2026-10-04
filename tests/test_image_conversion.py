@@ -32,6 +32,180 @@ def make_source(path: Path, external: bool = False) -> None:
 class ImageConversionTests(unittest.TestCase):
     """覆盖图片内容、关系、显示比例与禁用保留。"""
 
+    def test_vector_and_tiff_preview_metrics(self) -> None:
+        """有效 SVG 与 TIFF 在用户预览中显示与任务分析一致的尺寸。"""
+        from k12.previews import build_file_preview
+        from k12.processor import TaskProcessor
+        fixtures = {
+            "sample.svg": b'<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4"/>',
+            "sample.tiff": (Path(__file__).parent / "fixtures/images/sample.tiff").read_bytes(),
+        }
+        with tempfile.TemporaryDirectory() as temporary:
+            for filename, data in fixtures.items():
+                path = Path(temporary) / filename
+                path.write_bytes(data)
+                preview = build_file_preview({"id": filename, "file_name": filename, "file_type": "图片", "storage_path": str(path)})
+                metrics = preview["metrics"]
+                self.assertEqual((metrics["width"], metrics["height"], metrics["image_type"]), TaskProcessor._image_dimensions(data))
+                self.assertIn("8 x 4 px", preview["pages"][0]["text"])
+
+    def test_bmp_top_down_and_core_dimensions(self) -> None:
+        """任务、预览和转换器对 BMP 方向与核心头采用相同尺寸。"""
+        from k12.media import bmp_dimensions, _raster_dimensions
+        from k12.processor import TaskProcessor
+        from k12.previews import _image_dimensions
+        fixture = bytearray((Path(__file__).parent / "fixtures/images/sample.bmp").read_bytes())
+        fixture[22:26] = struct.pack("<i", -4)
+        core = b'BM' + b'\0' * 12 + struct.pack("<IHHHH", 12, 8, 4, 1, 24)
+        for data in (bytes(fixture), core):
+            self.assertEqual(bmp_dimensions(data), (8, 4))
+            self.assertEqual(_raster_dimensions(data), (8, 4))
+            self.assertEqual(TaskProcessor._image_dimensions(data), (8, 4, "bmp"))
+            self.assertEqual(_image_dimensions(data), (8, 4, "bmp"))
+        fixture[18:22] = struct.pack("<i", -8)
+        for data in (bytes(fixture), bytes(fixture[:26])):
+            self.assertEqual(bmp_dimensions(data), (0, 0))
+            self.assertIsNone(TaskProcessor._image_dimensions(data))
+
+    def test_tiff_dimensions_and_invalid_directories(self) -> None:
+        """TIFF 双字节序和短/长整型尺寸一致，截断目录安全失败。"""
+        from k12.media import tiff_dimensions, _raster_dimensions
+        from k12.processor import TaskProcessor
+        fixture = (Path(__file__).parent / "fixtures/images/sample.tiff").read_bytes()
+        self.assertEqual(TaskProcessor._image_dimensions(fixture), (8, 4, "tiff"))
+        for order in ("<", ">"):
+            for kind, value_format in ((3, "H"), (4, "I")):
+                entries = b''.join(struct.pack(order + "HHI", tag, kind, 1) + struct.pack(order + value_format, value).ljust(4, b'\0') for tag, value in ((256, 8), (257, 4)))
+                data = (b'II' if order == "<" else b'MM') + struct.pack(order + "HIH", 42, 8, 2) + entries + b'\0' * 4
+                self.assertEqual(tiff_dimensions(data), (8, 4))
+                self.assertEqual(_raster_dimensions(data), (8, 4))
+                self.assertIsNone(TaskProcessor._image_dimensions(data[:-1]))
+        self.assertEqual(tiff_dimensions(b'II*\0\xff\xff\xff\xff'), (0, 0))
+
+    def test_svg_dimensions_for_task_analysis(self) -> None:
+        """任务分析识别 SVG 明确尺寸，拒绝百分比和实体声明。"""
+        from k12.processor import TaskProcessor
+        for attributes, expected in ((b'width="8" height="4"', (8, 4, "svg")), (b'width="1in" height="12pt"', (96, 16, "svg")), (b'width="100%" height="4"', None)):
+            data = b'<svg xmlns="http://www.w3.org/2000/svg" ' + attributes + b'/>'
+            self.assertEqual(TaskProcessor._image_dimensions(data), expected)
+        self.assertIsNone(TaskProcessor._image_dimensions(b'<!DOCTYPE svg><svg xmlns="http://www.w3.org/2000/svg" width="8" height="4"/>'))
+
+    def test_svg_intrinsic_size_without_drawing_extent(self) -> None:
+        """没有绘图尺寸时使用 SVG 原图明确尺寸，不猜测百分比。"""
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / "source.docx"
+            make_source(source)
+            with zipfile.ZipFile(source) as archive:
+                parts = {name: archive.read(name) for name in archive.namelist() if name != "word/media/source.png"}
+            parts["word/document.xml"] = parts["word/document.xml"].replace(b'<wp:extent cx="2000000" cy="1000000"/>', b'')
+            parts["word/_rels/document.xml.rels"] = parts["word/_rels/document.xml.rels"].replace(b"source.png", b"source.svg")
+            for width in ("8", "100%"):
+                parts["word/media/source.svg"] = f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="4"/>'.encode()
+                with zipfile.ZipFile(source, "w") as archive:
+                    for name, data in parts.items():
+                        archive.writestr(name, data)
+                if width == "8":
+                    image = next(block["image"] for block in extract_docx_blocks(source) if "image" in block)
+                    self.assertEqual((image["width"], image["height"]), (8 * 9525, 4 * 9525))
+                else:
+                    with self.assertRaisesRegex(ValueError, "显示尺寸"):
+                        extract_docx_blocks(source)
+
+    def test_svg_with_raster_fallback_round_trip(self) -> None:
+        """SVG 与备用 PNG 写入同一图片对象，双向转换保留两份内容。"""
+        from k12.converters import build_docx_from_slides
+        vector = b'<svg xmlns="http://www.w3.org/2000/svg" width="8" height="4"><rect width="8" height="4" fill="red"/></svg>'
+        with tempfile.TemporaryDirectory() as temporary:
+            source, ppt, word = (Path(temporary) / name for name in ("source.docx", "result.pptx", "result.docx"))
+            make_source(source)
+            with zipfile.ZipFile(source) as archive:
+                parts = {name: archive.read(name) for name in archive.namelist()}
+            parts["word/document.xml"] = parts["word/document.xml"].replace(b'<a:blip r:embed="image"/>', b'<a:blip r:embed="image"><a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="vector"/></a:ext></a:extLst></a:blip>')
+            parts["word/_rels/document.xml.rels"] = parts["word/_rels/document.xml.rels"].replace(b'</Relationships>', b'<Relationship Id="vector" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/source.svg"/></Relationships>')
+            parts["word/media/source.svg"] = vector
+            with zipfile.ZipFile(source, "w") as archive:
+                for name, data in parts.items():
+                    archive.writestr(name, data)
+            from k12.media import image_locations
+            with zipfile.ZipFile(source) as archive:
+                locations = image_locations(archive)
+            self.assertEqual(locations["word/media/source.svg"], locations["word/media/source.png"])
+            build_pptx_from_docx(extract_docx_blocks(source), ppt)
+            slides = extract_pptx_slides(ppt)
+            self.assertEqual(sum(slide["image_count"] for slide in slides), 1)
+            build_docx_from_slides(slides, word)
+            for target in (ppt, word):
+                with zipfile.ZipFile(target) as archive:
+                    media = [archive.read(name) for name in archive.namelist() if '/media/' in name]
+                    self.assertCountEqual(media, [vector, image_bytes()])
+            with zipfile.ZipFile(ppt) as archive:
+                parts = {name: archive.read(name) for name in archive.namelist()}
+            slide_name = next(name for name in parts if name.startswith("ppt/slides/slide") and b"svgBlip" in parts[name])
+            root = ET.fromstring(parts[slide_name])
+            picture = root.find(".//{*}pic")
+            from copy import deepcopy
+            duplicate = deepcopy(picture)
+            duplicate.find(".//{*}svgBlip").set("{http://schemas.openxmlformats.org/officeDocument/2006/relationships}embed", "svg2")
+            root.find(".//{*}spTree").append(duplicate)
+            parts[slide_name] = ET.tostring(root)
+            folder, filename = slide_name.rsplit("/", 1)
+            relation_name = folder + "/_rels/" + filename + ".rels"
+            relations = ET.fromstring(parts[relation_name])
+            relation = deepcopy(next(node for node in relations if node.get("Id") == "svg"))
+            relation.set("Id", "svg2")
+            relations.append(relation)
+            parts[relation_name] = ET.tostring(relations)
+            with zipfile.ZipFile(ppt, "w") as archive:
+                for name, data in parts.items():
+                    archive.writestr(name, data)
+            self.assertEqual(sum(slide["image_count"] for slide in extract_pptx_slides(ppt)), 2)
+            self.assertEqual(sum(slide["image_count"] for slide in extract_pptx_slides(ppt, retain_images=False)), 2)
+            for invalid in ("external", "missing", "wrong_format"):
+                with self.subTest(svg_relation=invalid):
+                    damaged = parts.copy()
+                    relations = ET.fromstring(damaged[relation_name])
+                    relation = next(node for node in relations if node.get("Id") == "svg2")
+                    if invalid == "external":
+                        relation.set("TargetMode", "External")
+                    elif invalid == "missing":
+                        relations.remove(relation)
+                    else:
+                        relation.set("Target", "../media/image2.png")
+                    damaged[relation_name] = ET.tostring(relations)
+                    with zipfile.ZipFile(ppt, "w") as archive:
+                        for name, data in damaged.items():
+                            archive.writestr(name, data)
+                    with self.assertRaises(ValueError):
+                        extract_pptx_slides(ppt)
+
+    def test_raster_formats_round_trip(self) -> None:
+        """有效栅格图片在双向转换后保留原始字节与真实引用。"""
+        from k12.converters import build_docx_from_slides
+        fixtures = sorted((Path(__file__).parent / "fixtures/images").glob("sample.*"))
+        self.assertEqual({fixture.suffix for fixture in fixtures}, {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff"})
+        for fixture in fixtures:
+            with self.subTest(format=fixture.suffix), tempfile.TemporaryDirectory() as temporary:
+                source, ppt, word = (Path(temporary) / name for name in ("source.docx", "result.pptx", "result.docx"))
+                make_source(source)
+                with zipfile.ZipFile(source) as archive:
+                    parts = {name: archive.read(name) for name in archive.namelist() if name != "word/media/source.png"}
+                parts["word/_rels/document.xml.rels"] = parts["word/_rels/document.xml.rels"].replace(b"source.png", fixture.name.encode())
+                parts["word/media/" + fixture.name] = fixture.read_bytes()
+                with zipfile.ZipFile(source, "w") as archive:
+                    for name, data in parts.items():
+                        archive.writestr(name, data)
+                build_pptx_from_docx(extract_docx_blocks(source), ppt)
+                slides = extract_pptx_slides(ppt)
+                self.assertEqual(sum(slide["image_count"] for slide in slides), 1)
+                build_docx_from_slides(slides, word)
+                for target, prefix in ((ppt, "ppt/media/"), (word, "word/media/")):
+                    with zipfile.ZipFile(target) as archive:
+                        media = [name for name in archive.namelist() if name.startswith(prefix)]
+                        self.assertEqual(len(media), 1)
+                        self.assertTrue(media[0].endswith(fixture.suffix))
+                        self.assertEqual(archive.read(media[0]), fixture.read_bytes())
+                self.assertEqual(sum("image" in block for block in extract_docx_blocks(word)), 1)
+
     def test_embedded_image_parts_relationships_and_ratio(self) -> None:
         """真实媒体内容不变，形状通过关系引用，显示比例保留。"""
         with tempfile.TemporaryDirectory() as tmp:

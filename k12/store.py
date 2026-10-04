@@ -279,6 +279,10 @@ class AppStore:
                     payload text not null,
                     created_at text not null
                 );
+                create table if not exists macro_sources (
+                    id text primary key,
+                    payload text not null
+                );
                 create table if not exists logs (
                     id integer primary key autoincrement,
                     task_id text not null,
@@ -627,10 +631,13 @@ class AppStore:
             row = conn.execute("select payload from reports where id = ?", (report_id,)).fetchone()
         return json.loads(row["payload"]) if row else None
 
-    def list_reports(self) -> list[dict[str, Any]]:
+    def list_reports(self, task_id: str | None = None) -> list[dict[str, Any]]:
         """按新到旧顺序返回报告。"""
         with self._lock, self.connect() as conn:
-            rows = conn.execute("select payload from reports order by created_at desc, rowid desc").fetchall()
+            query = "select payload from reports"
+            if task_id is not None:
+                query += " where task_id = ?"
+            rows = conn.execute(query + " order by created_at desc, rowid desc", (task_id,) if task_id is not None else ()).fetchall()
         return [json.loads(row["payload"]) for row in rows]
 
     def delete_report(self, report_id: str) -> dict[str, Any]:
@@ -685,6 +692,29 @@ class AppStore:
                     (limit,),
                 ).fetchall()
         return [dict(row) for row in rows]
+
+    def save_macro_source(self, payload: dict[str, Any]) -> None:
+        """保存受管 VBA 源文本与声明，不执行或加载到 Office。"""
+        with self._lock, self.connect() as conn:
+            conn.execute("insert or replace into macro_sources (id, payload) values (?, ?)",
+                         (payload["id"], json.dumps(payload, ensure_ascii=False)))
+
+    def list_macro_sources(self) -> list[dict[str, Any]]:
+        """返回本地导入的 VBA 来源记录。"""
+        with self._lock, self.connect() as conn:
+            rows = conn.execute("select payload from macro_sources order by rowid").fetchall()
+        return [json.loads(row["payload"]) for row in rows]
+
+    def delete_macro_source(self, source_id: str) -> bool:
+        """删除本地导入模块；历史报告内容保持独立。"""
+        with self._lock, self.connect() as conn:
+            return conn.execute("delete from macro_sources where id = ?", (source_id,)).rowcount > 0
+
+    def get_macro_source(self, source_id: str) -> dict[str, Any] | None:
+        """按标识读取受管 VBA 源记录。"""
+        with self._lock, self.connect() as conn:
+            row = conn.execute("select payload from macro_sources where id = ?", (source_id,)).fetchone()
+        return json.loads(row["payload"]) if row else None
 
     def get_settings(self) -> dict[str, Any]:
         """返回设置并将 PDF 转 Word 引擎规范为 Mathpix。"""

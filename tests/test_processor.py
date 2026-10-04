@@ -239,6 +239,16 @@ class DocumentAnalyzerTests(unittest.TestCase):
 
 
 class TaskProcessorTests(unittest.TestCase):
+    def test_reports_filtered_by_task(self) -> None:
+        """任务过滤只返回关联报告，参数化查询不会扩大匹配范围。"""
+        with tempfile.TemporaryDirectory() as temporary:
+            store = AppStore(temporary)
+            for index, task_id in enumerate(("first", "second", "first")):
+                store.save_report({"id": str(index), "task_id": task_id, "created_at": "2026-10-04", "analysis": {}})
+            self.assertEqual([report["id"] for report in store.list_reports("first")], ["2", "0"])
+            self.assertEqual(len(store.list_reports()), 3)
+            self.assertEqual(store.list_reports("first' OR 1=1 --"), [])
+
     def test_core_prd_modules_keep_boundary_docstrings(self) -> None:
         root = Path(__file__).resolve().parents[1]
         for module_path in sorted((root / "k12").glob("*.py")):

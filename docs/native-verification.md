@@ -48,3 +48,9 @@ PowerPoint 旧格式转换与任务二段处理已有当前机器真实证据；
 ## 自动化闭环回归
 
 集成测试从真实服务端任务合同出发，覆盖旧 `.ppt` 上传分析、macOS 心跳与 `officeAutomation` 能力门禁、受管 `.inputs` 快照、大小与 SHA-256 校验、原生执行报告脱敏、`local-sync` 对账、报告和质量状态重写，以及 artifact 下载内容一致性。测试中的 Office 规范化边界使用可控 PPTX 夹具，用于验证跨模块合同，不替代上述真实 PowerPoint GUI 实测。
+
+## 2026-10-04：Word for Mac 宏接口复核
+
+直接读取当前安装的 /Applications/Microsoft Word.app/Contents/Resources/Word.sdef，确认命令 run VB macro（sWRD1149）及参数 macro name（5112）存在，说明原生应用提供已有宏执行接口。sdef CLI 因未安装完整 Xcode 不可用，使用应用自带字典完成只读核验。
+
+该证据不证明宏实际执行成功。字典未发现 VBProject 或导入源代码入口，当前导入的 .bas 不能据此自动加载；客户端还需实现受管文档/模板的已有宏执行、备份、所有权、顺序和失败策略，并以真实产物验证。macroExecution 继续保持 False。

@@ -20,7 +20,8 @@ from typing import Any
 from xml.etree import ElementTree as ET
 from urllib.parse import urlencode, urlparse
 
-from .media import image_locations
+from .media import bmp_dimensions, image_locations, svg_dimensions, tiff_dimensions
+from .vba_sources import vba_macros
 
 from .models import (
     LOCAL_REQUIRED_TASKS,
@@ -2797,6 +2798,9 @@ class TaskProcessor:
             self._api_endpoint("POST", "/api/templates", "模板保存", "token" if token_required else "local", "创建或更新网页端模板配置，需要模板管理权限", True, "templates.manage"),
             self._api_endpoint("DELETE", "/api/templates/{template_id}", "模板删除", "token" if token_required else "local", "删除网页端模板配置，需要模板管理权限", True, "templates.manage"),
             self._api_endpoint("GET", "/api/macro-templates", "宏顺序模板列表", "token" if token_required else "local", "返回 Word 宏顺序模板"),
+            self._api_endpoint("POST", "/api/macros/import", "VBA 源导入", "token" if token_required else "local", "导入 UTF-8 .bas 标准模块的真实宏声明，不执行代码", True, "templates.manage"),
+            self._api_endpoint("GET", "/api/macros/sources/{source_id}", "VBA 定义读取", "token" if token_required else "local", "向有宏执行权限的客户端返回通过哈希及声明校验的源定义", True, "macros.execute"),
+            self._api_endpoint("DELETE", "/api/macros/sources/{source_id}", "VBA 来源删除", "token" if token_required else "local", "删除没有待执行任务或模板引用的导入模块", True, "templates.manage"),
             self._api_endpoint("POST", "/api/macro-templates", "宏顺序模板保存", "token" if token_required else "local", "保存 Word 宏编排模板，需要模板管理权限", True, "templates.manage"),
             self._api_endpoint("DELETE", "/api/macro-templates/{template_id}", "宏顺序模板删除", "token" if token_required else "local", "删除 Word 宏编排模板，需要模板管理权限", True, "templates.manage"),
             self._api_endpoint("GET", "/api/authorizations", "授权列表", "token" if token_required else "local", "返回 Mathpix、云端同步和本地唤起授权状态"),
@@ -7242,6 +7246,11 @@ class TaskProcessor:
                     "file_id": macro.get("file_id", ""),
                     "macro_name": macro.get("macro_name", ""),
                     "macro_source": macro.get("macro_source", ""),
+                    "source_id": macro.get("source_id", ""),
+                    "source_file": macro.get("source_file", ""),
+                    "source_sha256": macro.get("source_sha256", ""),
+                    "module_name": macro.get("module_name", ""),
+                    "source_line": macro.get("source_line", 0),
                     "execute_order": macro.get("execute_order", 0),
                     "execute_timing": macro.get("execute_timing", ""),
                     "failure_strategy": macro.get("failure_strategy", ""),
@@ -7539,6 +7548,55 @@ class TaskProcessor:
             status = f"{status}；仅允许白名单宏"
         return status
 
+    def import_macro_source(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """导入 UTF-8 标准 VBA 模块，保存真实声明与完整来源文本。"""
+        self._assert_permission("templates.manage")
+        filename = str(payload.get("file_name") or "")
+        source = payload.get("source")
+        if not filename.lower().endswith(".bas") or "/" in filename or "\\" in filename or len(filename) > 255:
+            raise ValueError("请选择 .bas 标准模块源文件")
+        if not isinstance(source, str):
+            raise ValueError("VBA 源内容必须是文本")
+        if len(source.encode("utf-8")) > 2_000_000:
+            raise ValueError("VBA 源文件不能超过 2 MB")
+        declarations = vba_macros(source)
+        if not declarations:
+            raise ValueError("源模块中未找到公开无参数宏")
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        identifier = "vba_" + hashlib.sha256((filename + "\0" + digest).encode()).hexdigest()[:24]
+        record = {"id": identifier, "file_name": filename, "sha256": digest, "source": source, "macros": declarations}
+        self.store.save_macro_source(record)
+        return {key: value for key, value in record.items() if key != "source"}
+
+    def macro_source_definition(self, source_id: str) -> dict[str, Any]:
+        """仅向有宏执行权限的调用方返回通过哈希核验的源定义。"""
+        self._assert_permission("macros.execute")
+        source = self.store.get_macro_source(source_id)
+        if source is None:
+            raise ValueError("导入模块不存在")
+        digest = hashlib.sha256(source["source"].encode("utf-8")).hexdigest()
+        if digest != source["sha256"] or vba_macros(source["source"]) != source["macros"]:
+            raise ValueError("宏源定义与保存的哈希或声明不一致")
+        return source
+
+    def delete_macro_source(self, source_id: str) -> bool:
+        """删除未被待执行任务引用的导入模块，保留内置宏。"""
+        self._assert_permission("templates.manage")
+        sources = {item["id"] for item in self.store.list_macro_sources()}
+        if source_id not in sources:
+            raise ValueError("导入模块不存在")
+        for template in self.store.list_macro_templates():
+            if any(str(item.get("id") or "").startswith(source_id + "_") for item in template.get("macro_sequence", [])):
+                raise ValueError("模块被宏顺序模板引用，请先修改或删除模板")
+        for task in self.store.list_tasks():
+            if task.get("status") in {"成功", "失败", "已取消"}:
+                continue
+            for spec in self._selected_macro_specs(task.get("options", {})):
+                identifier = str(spec.get("id") or spec.get("macro_id") or "")
+                if identifier.startswith(source_id + "_"):
+                    raise ValueError("模块被待执行任务引用，请先处理该任务")
+        return self.store.delete_macro_source(source_id)
+
     def macro_library(self) -> list[dict[str, Any]]:
         """返回内置宏选择与使用元数据。"""
         macro_specs = [
@@ -7558,6 +7616,17 @@ class TaskProcessor:
             item["last_used_at"] = str(stats.get("last_used_at") or "")
             item["recently_used"] = item["usage_count"] > 0
             items.append(item)
+        for source in self.store.list_macro_sources():
+            for index, declaration in enumerate(source["macros"]):
+                identifier = source["id"] + "_" + str(index)
+                item = MacroItem(declaration["qualified_name"], "本地宏库", "导入的 VBA 标准模块", len(items) + 1, id=identifier).to_dict()
+                item.update(declaration)
+                item.update({"macro_name": declaration["qualified_name"], "source_id": source["id"],
+                             "source_file": source["file_name"], "source_sha256": source["sha256"],
+                             "macro_purpose": "本地导入", "usage_count": usage.get(identifier, {}).get("usage_count", 0),
+                             "last_used_at": usage.get(identifier, {}).get("last_used_at", ""),
+                             "recently_used": bool(usage.get(identifier)), "definition_available": True})
+                items.append(item)
         return items
 
     def _macro_usage_index(self) -> dict[str, dict[str, Any]]:
@@ -9983,6 +10052,12 @@ class TaskProcessor:
         items: list[dict[str, Any]] = []
         for index, spec in enumerate(selected, start=1):
             macro_id = str(spec.get("id") or spec.get("macro_id") or "")
+            if macro_id.startswith("vba_"):
+                if macro_id not in library:
+                    raise ValueError("导入宏来源已删除，请重新选择宏")
+                source = self.macro_source_definition(library[macro_id]["source_id"])
+                if source["sha256"] != library[macro_id]["source_sha256"]:
+                    raise ValueError("导入宏来源已改变，请重新选择宏")
             macro = dict(library.get(macro_id) or self._macro_from_freeform(spec, index))
             macro["file_id"] = file["id"]
             macro["execute_order"] = int(spec.get("execute_order") or index)
@@ -10476,9 +10551,18 @@ class TaskProcessor:
         if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
             return int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:10], "little"), "gif"
         if data.startswith(b"BM") and len(data) >= 26:
-            return int.from_bytes(data[18:22], "little"), int.from_bytes(data[22:26], "little"), "bmp"
+            width, height = bmp_dimensions(data)
+            return (width, height, "bmp") if width > 0 and height > 0 else None
         if data.startswith(b"\xff\xd8"):
             return TaskProcessor._jpeg_dimensions(data)
+        if data[:4] in {b"II*\x00", b"MM\x00*"}:
+            width, height = tiff_dimensions(data)
+            if width > 0 and height > 0:
+                return width, height, "tiff"
+        if data.lstrip().startswith(b"<"):
+            width, height = svg_dimensions(data)
+            if width > 0 and height > 0:
+                return width, height, "svg"
         return None
 
     @staticmethod

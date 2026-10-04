@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
-from .text_styles import UNDERLINES, WordTextStyles
+from .text_styles import PARAGRAPH_ALIGNMENTS, UNDERLINES, WordTextStyles
 from .charts import OFFICE_REL, REL_NS, build_chart, chart_frame, chart_has_values
 from .ooxml import parse_compatible_xml
 from .media import IMAGE_TYPES, picture_xml, word_images, word_picture_xml, word_story_images
@@ -128,7 +128,7 @@ def _cell_line_alignments(cell: ET.Element, word: bool = False) -> list[str]:
                 node = properties.find("{*}jc")
                 alignment = node.get("{http://schemas.openxmlformats.org/wordprocessingml/2006/main}val", "") if node is not None else ""
             else:
-                alignment = {"l": "left", "ctr": "center", "r": "right", "just": "both"}.get(properties.get("algn"), "")
+                alignment = {value: key for key, value in PARAGRAPH_ALIGNMENTS.items()}.get(properties.get("algn"), "")
         text = _docx_visible_text(paragraph) if word else "\n".join(_pptx_texts(ET.tostring(paragraph, encoding="unicode"), preserve_whitespace=True))
         result.extend([alignment] * (text.count("\n") + 1))
     return result
@@ -198,12 +198,17 @@ def extract_pptx_slides(path: Path, retain_images: bool = True) -> list[dict[str
             except ET.ParseError:
                 root = None
             cleaned = _pptx_texts(xml, exclude_tables=True)
-            styled = _pptx_styled_paragraphs(xml)
+            styled = _pptx_styled_paragraphs(xml, _pptx_related_root(archive, name, "slideLayout"), _pptx_related_root(archive, name, "slideLayout", "slideMaster"), _pptx_related_root(archive, name, "slideLayout", ("slideMaster", "theme")))
             title = cleaned[0] if cleaned else f"幻灯片 {index}"
             body = cleaned[1:] if len(cleaned) > 1 else []
             related_parts = _pptx_related_parts(archive, name)
             notes = _pptx_notes(archive, related_parts)
             formula_count = _pptx_formula_count(xml)
+            images = word_images(path, ET.fromstring(xml), name) if retain_images and "blip" in xml else []
+            image_count = len({part for part in related_parts if "/media/" in f"/{part.lower()}"})
+            if root is not None and root.find(".//{http://schemas.microsoft.com/office/drawing/2016/SVG/main}svgBlip") is not None:
+                # SVG 原图与备用位图按绘图对象计数，避免共享关系重复扣减。
+                image_count = len(root.findall(".//{http://schemas.openxmlformats.org/drawingml/2006/main}blip"))
             slides.append(
                 {
                     "title": title,
@@ -220,8 +225,8 @@ def extract_pptx_slides(path: Path, retain_images: bool = True) -> list[dict[str
                     "table_widths": _pptx_table_widths(xml),
                     "table_heights": _pptx_table_heights(xml),
                     "table_alignments": _pptx_table_alignments(xml),
-                    "images": word_images(path, ET.fromstring(xml), name) if retain_images and "blip" in xml else [],
-                    "image_count": len({part for part in related_parts if "/media/" in f"/{part.lower()}"}),
+                    "images": images,
+                    "image_count": image_count,
                     "chart_count": len({part for part in related_parts if "/charts/" in f"/{part.lower()}"}),
                     "formula_count": formula_count,
                 }
@@ -434,6 +439,10 @@ def build_docx_from_slides(
 ) -> list[str]:
     """根据提取的幻灯片结构生成轻量 DOCX 讲义。"""
     warnings = ["图片按行内绘图保留，原幻灯片位置和分组布局未还原"] if retain_images and any(slide.get("images") for slide in slides) else []
+    if any(run.get("theme_font_unresolved") for slide in slides for group in [slide.get("title_runs", []), *slide.get("body_runs", [])] for run in group):
+        warnings.append("部分 PPT 主题字体尚未解析，已使用 Word 默认字体")
+    if any(run.get("theme_color_unresolved") for slide in slides for group in [slide.get("title_runs", []), *slide.get("body_runs", [])] for run in group):
+        warnings.append("部分 PPT 文字颜色及填充变换尚未解析，已使用 Word 默认颜色")
     paragraphs: list[dict[str, Any]] = []
     if mode:
         paragraphs.append({"text": f"PPT 转 Word 模式：{mode}", "style": "Heading1"})
@@ -750,7 +759,7 @@ def build_docx(paragraphs: list[dict[str, Any]], target: Path) -> None:
         elif "table" in item:
             body_parts.append(_docx_table(item["table"], item.get("column_widths"), item.get("row_heights"), item.get("cell_alignments")))
         else:
-            body_parts.append(_docx_paragraph(item["text"], item.get("style", "Normal"), runs=item.get("runs")))
+            body_parts.append(_docx_paragraph(item["text"], item.get("style", "Normal"), alignment=item.get("alignment", ""), runs=item.get("runs")))
     body = "".join(body_parts)
     document = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr></w:body></w:document>"""
@@ -764,6 +773,9 @@ def build_docx(paragraphs: list[dict[str, Any]], target: Path) -> None:
             part = f'image{index}.{image["extension"]}'
             archive.writestr(f"word/media/{part}", base64.b64decode(image["data"], validate=True))
             relationships.append(f'<Relationship Id="image{index}" Type="{OFFICE_REL}/image" Target="media/{part}"/>')
+            if image.get("svg"):
+                archive.writestr(f"word/media/vector{index}.svg", base64.b64decode(image["svg"]["data"], validate=True))
+                relationships.append(f'<Relationship Id="svg{index}" Type="{OFFICE_REL}/image" Target="media/vector{index}.svg"/>')
         archive.writestr("word/_rels/document.xml.rels", f'<Relationships xmlns="{REL_NS}">{"".join(relationships)}</Relationships>')
 
 
@@ -789,6 +801,9 @@ def build_pptx(slides: list[dict[str, Any]], target: Path) -> None:
                 extension = image["extension"]
                 archive.writestr(f"ppt/media/image{index}.{extension}", base64.b64decode(image["data"], validate=True))
                 relationships.append(f'<Relationship Id="image" Type="{OFFICE_REL}/image" Target="../media/image{index}.{extension}"/>')
+                if image.get("svg"):
+                    archive.writestr(f"ppt/media/vector{index}.svg", base64.b64decode(image["svg"]["data"], validate=True))
+                    relationships.append(f'<Relationship Id="svg" Type="{OFFICE_REL}/image" Target="../media/vector{index}.svg"/>')
                 xml = xml.replace("</p:spTree>", picture_xml(image) + "</p:spTree>")
             if slide.get("native_chart"):
                 chart_xml, workbook = slide["native_chart"]
@@ -1004,6 +1019,24 @@ def _xlsx_cells(xml: str, shared_strings: list[str]) -> list[dict[str, str]]:
     return cells
 
 
+def _pptx_related_root(archive: zipfile.ZipFile, part: str, kind: str, following: str | tuple[str, ...] = "") -> ET.Element | None:
+    """按关系类型加载版式或母版，不依赖固定文件名。"""
+    relation_part = f"{posixpath.dirname(part)}/_rels/{posixpath.basename(part)}.rels"
+    if relation_part not in archive.namelist():
+        return None
+    for relation in ET.fromstring(archive.read(relation_part)):
+        if not relation.get("Type", "").endswith("/" + kind):
+            continue
+        if relation.get("TargetMode") == "External":
+            raise ValueError("PPT 样式部件不能使用外部关系")
+        target = _resolve_xlsx_target(part, relation.get("Target", ""))
+        if following:
+            chain = (following,) if isinstance(following, str) else following
+            return _pptx_related_root(archive, target, chain[0], chain[1:])
+        return parse_compatible_xml(archive.read(target))
+    return None
+
+
 def _pptx_related_parts(archive: zipfile.ZipFile, part_path: str) -> list[str]:
     """解析幻灯片或备注部件引用的关联部件。"""
     rels_path = f"{posixpath.dirname(part_path)}/_rels/{posixpath.basename(part_path)}.rels"
@@ -1041,18 +1074,90 @@ def _pptx_notes(archive: zipfile.ZipFile, related_parts: list[str]) -> list[str]
     return notes
 
 
-def _pptx_styled_paragraphs(xml: str) -> list[list[dict]]:
-    """读取非表格段落的直接格式，空白裁剪保持文字与片段对应。"""
+def _pptx_text_body_defaults(body: ET.Element | None, level: int) -> list[ET.Element | None]:
+    """读取占位符文本框及同级段落的默认格式，供版式和母版共用。"""
+    if body is None:
+        return []
+    defaults = [body.find(path) for path in ("{*}lstStyle/{*}defPPr", "{*}lstStyle/{*}defPPr/{*}defRPr", "{*}lstStyle/{*}lvl" + str(level + 1) + "pPr", "{*}lstStyle/{*}lvl" + str(level + 1) + "pPr/{*}defRPr")]
+    for paragraph in body.findall("{*}p"):
+        properties = paragraph.find("{*}pPr")
+        if properties is not None and int(properties.get("lvl", "0")) == level:
+            defaults.extend([properties, properties.find("{*}defRPr")])
+            break
+    return defaults
+
+
+def _pptx_color_mapping(slide: ET.Element, layout: ET.Element | None, master: ET.Element | None) -> dict[str, str]:
+    """按母版、版式、幻灯片读取色板映射，显式母版映射会重置覆盖。"""
+    mapping = {"tx1": "dk1", "tx2": "dk2", "bg1": "lt1", "bg2": "lt2"}
+    master_mapping = master.find("{*}clrMap") if master is not None else None
+    if master_mapping is not None:
+        mapping.update(master_mapping.attrib)
+    result = mapping.copy()
+    for root in (layout, slide):
+        if root is None:
+            continue
+        override = root.find("{*}clrMapOvr")
+        if override is not None:
+            if override.find("{*}masterClrMapping") is not None:
+                result = mapping.copy()
+            explicit = override.find("{*}overrideClrMapping")
+            if explicit is not None:
+                result.update(explicit.attrib)
+    return result
+
+
+def _pptx_styled_paragraphs(xml: str, layout: ET.Element | None = None, master: ET.Element | None = None, theme: ET.Element | None = None) -> list[list[dict]]:
+    """读取文本框、段落和片段格式，空白裁剪保持文字与片段对应。"""
     try:
         root = ET.fromstring(xml)
     except ET.ParseError:
         return []
+    theme_fonts = WordTextStyles(None, theme)
+    color_mapping = _pptx_color_mapping(root, layout, master)
     for parent in root.iter():
         for child in list(parent):
             if child.tag.rsplit("}", 1)[-1] == "tbl":
                 parent.remove(child)
+    parents = {child: parent for parent in root.iter() for child in parent}
     paragraphs = []
     for paragraph in root.findall(".//{*}p"):
+        body = parents.get(paragraph)
+        list_style = body.find("{*}lstStyle") if body is not None else None
+        paragraph_properties = paragraph.find("{*}pPr")
+        level = int(paragraph_properties.get("lvl", "0")) if paragraph_properties is not None else 0
+        if not 0 <= level <= 8:
+            raise ValueError("PPT 段落级别超出可转换范围")
+        defaults = [list_style.find(path) if list_style is not None else None
+                    for path in ("{*}defPPr", "{*}defPPr/{*}defRPr", "{*}lvl" + str(level + 1) + "pPr", "{*}lvl" + str(level + 1) + "pPr/{*}defRPr")]
+        shape = parents.get(body)
+        placeholder = shape.find("{*}nvSpPr/{*}nvPr/{*}ph") if shape is not None else None
+        placeholder_type = placeholder.get("type", "obj") if placeholder is not None else ""
+        if placeholder is not None and layout is not None:
+            for candidate in layout.findall(".//{*}sp"):
+                reference = candidate.find("{*}nvSpPr/{*}nvPr/{*}ph")
+                if reference is None or reference.get("idx", "0") != placeholder.get("idx", "0"):
+                    continue
+                placeholder_type = reference.get("type", "obj")
+                inherited = candidate.find("{*}txBody")
+                if inherited is not None:
+                    defaults = [*_pptx_text_body_defaults(inherited, level), *defaults]
+                break
+        if master is not None:
+            style_kind = "titleStyle" if placeholder_type in {"title", "ctrTitle"} else "bodyStyle" if placeholder_type in {"body", "obj", "subTitle"} else "otherStyle"
+            inherited_defaults = []
+            master_type = {"obj": "body", "ctrTitle": "title"}.get(placeholder_type, placeholder_type)
+            if placeholder is not None:
+                for candidate in master.findall(".//{*}sp"):
+                    reference = candidate.find("{*}nvSpPr/{*}nvPr/{*}ph")
+                    if reference is not None and reference.get("type", "obj") == master_type:
+                        inherited_defaults = _pptx_text_body_defaults(candidate.find("{*}txBody"), level)
+                        break
+            defaults = [*inherited_defaults, *defaults]
+            master_style = master.find("{*}txStyles/{*}" + style_kind)
+            if master_style is not None:
+                defaults = [master_style.find(path) for path in ("{*}defPPr", "{*}defPPr/{*}defRPr", "{*}lvl" + str(level + 1) + "pPr", "{*}lvl" + str(level + 1) + "pPr/{*}defRPr")] + defaults
+        defaults.extend([paragraph_properties, paragraph.find("{*}pPr/{*}defRPr")])
         runs = []
         for node in paragraph:
             tag = node.tag.rsplit("}", 1)[-1]
@@ -1060,27 +1165,58 @@ def _pptx_styled_paragraphs(xml: str) -> list[list[dict]]:
                 runs.append({"text": "\n"})
             elif tag in {"r", "fld"}:
                 run = {"text": node.findtext("{*}t", "")}
-                properties = node.find("{*}rPr")
-                if properties is not None:
-                    if properties.get("u"):
-                        if properties.get("u") not in UNDERLINES.values():
-                            raise ValueError("PPT 下划线类型无效")
-                        run["underline"] = properties.get("u")
-                    underline_color = properties.find("{*}uFill/{*}solidFill/{*}srgbClr")
-                    if underline_color is not None and re.fullmatch(r"[0-9a-fA-F]{6}", underline_color.get("val", "")):
-                        run["underline_color"] = underline_color.get("val").upper()
-                    for key in ("b", "i"):
-                        if key in properties.attrib:
-                            run[key] = properties.get(key) not in {"0", "false", "off"}
-                    if properties.get("sz"):
-                        run["size"] = int(properties.get("sz"))
-                    for key, font in (("font", "latin"), ("east_asia", "ea")):
-                        value = properties.find("{*}" + font)
-                        if value is not None and value.get("typeface") and not value.get("typeface").startswith("+"):
-                            run[key] = value.get("typeface")
-                    color = properties.find("{*}solidFill/{*}srgbClr")
-                    if color is not None and re.fullmatch(r"[0-9a-fA-F]{6}", color.get("val", "")):
-                        run["color"] = color.get("val").upper()
+                for properties in [*defaults, node.find("{*}rPr")]:
+                    if properties is not None:
+                        if properties.get("algn"):
+                            run["alignment"] = {value: key for key, value in PARAGRAPH_ALIGNMENTS.items()}.get(properties.get("algn"), "")
+                        if properties.get("lang"):
+                            run["lang"] = properties.get("lang")
+                        if properties.get("u"):
+                            if properties.get("u") not in UNDERLINES.values():
+                                raise ValueError("PPT 下划线类型无效")
+                            run["underline"] = properties.get("u")
+                        underline_color = properties.find("{*}uFill/{*}solidFill/{*}srgbClr")
+                        if properties.find("{*}uFillTx") is not None or properties.find("{*}uFill") is not None:
+                            run.pop("underline_color", None)
+                        if underline_color is not None and re.fullmatch(r"[0-9a-fA-F]{6}", underline_color.get("val", "")):
+                            run["underline_color"] = underline_color.get("val").upper()
+                        for key in ("b", "i"):
+                            if key in properties.attrib:
+                                run[key] = properties.get(key) not in {"0", "false", "off"}
+                        if properties.get("sz"):
+                            run["size"] = int(properties.get("sz"))
+                        for key, font in (("font", "latin"), ("east_asia", "ea")):
+                            value = properties.find("{*}" + font)
+                            if value is not None:
+                                run.pop(key, None)
+                            if value is not None:
+                                run.pop(key + "_theme", None)
+                                if value.get("typeface", "").startswith("+"):
+                                    run[key + "_theme"] = value.get("typeface")
+                                elif value.get("typeface"):
+                                    run[key] = value.get("typeface")
+                        color = properties.find("{*}solidFill/{*}srgbClr")
+                        if any(properties.find("{*}" + fill) is not None for fill in ("solidFill", "noFill", "gradFill", "blipFill", "pattFill", "grpFill")):
+                            run.pop("color", None)
+                            run.pop("theme_color_unresolved", None)
+                        if color is not None and not len(color) and re.fullmatch(r"[0-9a-fA-F]{6}", color.get("val", "")):
+                            run["color"] = color.get("val").upper()
+                        else:
+                            scheme = properties.find("{*}solidFill/{*}schemeClr")
+                            value = theme_fonts.theme_color({"themeColor": color_mapping.get(scheme.get("val"), scheme.get("val"))}) if scheme is not None and not len(scheme) else None
+                            if value:
+                                run["color"] = value
+                            elif properties.find("{*}solidFill") is not None:
+                                run["theme_color_unresolved"] = True
+                for key in ("font", "east_asia"):
+                    reference = run.pop(key + "_theme", None)
+                    if reference:
+                        match = re.fullmatch(r"\+(mj|mn)-(lt|ea)", reference)
+                        font = theme_fonts.theme_font(("major" if match[1] == "mj" else "minor") + ("Ascii" if match[2] == "lt" else "EastAsia"), language=run.get("lang", "") if match[2] == "ea" else None) if match else None
+                        if font:
+                            run[key] = font
+                        else:
+                            run["theme_font_unresolved"] = True
                 runs.append(run)
         text = "".join(run["text"] for run in runs)
         if text.strip():
@@ -1665,7 +1801,8 @@ def _docx_paragraph(text: str, style: str, alignment: str = "", runs: list[dict]
             properties.append(f'<w:u w:val="{value}"{color}/>')
         rpr = f'<w:rPr>{"".join(properties)}</w:rPr>' if properties else ""
         output.append(f'<w:r>{rpr}{"".join(pieces)}</w:r>')
-    alignment_xml = f'<w:jc w:val="{alignment}"/>' if alignment in {"left", "center", "right", "both"} else ""
+    alignment = alignment or runs[0].get("alignment", "")
+    alignment_xml = f'<w:jc w:val="{alignment}"/>' if alignment in PARAGRAPH_ALIGNMENTS else ""
     return f'<w:p><w:pPr>{alignment_xml}<w:pStyle w:val="{style}"/></w:pPr>{"".join(output)}</w:p>'
 
 
@@ -1789,7 +1926,9 @@ def _pptx_text_shape(shape_id: int, name: str, lines: list[str], y: int, height:
                 if line_index:
                     content.append('<a:br/>')
                 content.append(f'<a:r><a:rPr lang="zh-CN" sz="{size}" {style}>{color}{underline_color}<a:latin typeface="{latin}"/><a:ea typeface="{east_asia}"/></a:rPr><a:t>{html.escape(piece)}</a:t></a:r>')
-        paragraphs.append(f'<a:p>{"".join(content)}<a:endParaRPr lang="zh-CN" sz="{font_size}"/></a:p>')
+        alignment = PARAGRAPH_ALIGNMENTS.get(runs[0].get("alignment")) if runs else None
+        properties = f'<a:pPr algn="{alignment}"/>' if alignment else ""
+        paragraphs.append(f'<a:p>{properties}{"".join(content)}<a:endParaRPr lang="zh-CN" sz="{font_size}"/></a:p>')
     paragraphs = "".join(paragraphs) or '<a:p><a:endParaRPr lang="zh-CN"/></a:p>'
     return f'<p:sp><p:nvSpPr><p:cNvPr id="{shape_id}" name="{name}"/><p:cNvSpPr txBox="1"/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="457200" y="{y}"/><a:ext cx="8229600" cy="{height}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom><a:noFill/><a:ln><a:noFill/></a:ln></p:spPr><p:txBody><a:bodyPr wrap="square"><a:spAutoFit/></a:bodyPr><a:lstStyle/>{paragraphs}</p:txBody></p:sp>'
 
@@ -1847,7 +1986,7 @@ def _pptx_table_frame(rows: list[list[str]], merges: list[list[int]], column_wid
             alignments = cell_alignments[row_index][column] if cell_alignments and row_index < len(cell_alignments) and column < len(cell_alignments[row_index]) else []
             paragraphs = []
             for index, line in enumerate(text.split("\n")):
-                alignment = {"left": "l", "center": "ctr", "right": "r", "both": "just"}.get(alignments[index] if index < len(alignments) else "")
+                alignment = PARAGRAPH_ALIGNMENTS.get(alignments[index] if index < len(alignments) else "")
                 properties = f'<a:pPr algn="{alignment}"/>' if alignment else ""
                 paragraphs.append(f'<a:p>{properties}<a:r><a:rPr lang="zh-CN" sz="1800"/><a:t>{html.escape(line)}</a:t></a:r></a:p>')
             paragraphs = "".join(paragraphs)

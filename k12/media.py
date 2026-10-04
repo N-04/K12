@@ -1,6 +1,7 @@
 """读取 Word 内嵌图片并生成 PPT 原生图片形状。"""
 
 import base64
+import copy
 import math
 import posixpath
 import re
@@ -64,7 +65,7 @@ def image_locations(archive: zipfile.ZipFile) -> dict[str, list[str]]:
         parents = {child: parent for parent in root.iter() for child in parent}
         paragraphs = {paragraph: index for index, paragraph in enumerate(root.findall(".//{*}p"), 1)} if part.startswith("word/") else {}
         for node in root.iter():
-            if node.tag.rsplit("}", 1)[-1] not in {"blip", "imagedata"}:
+            if node.tag.rsplit("}", 1)[-1] not in {"blip", "imagedata"} and node.tag != "{http://schemas.microsoft.com/office/drawing/2016/SVG/main}svgBlip":
                 continue
             reference = node.get(RELATION + "embed") or node.get(RELATION + "id")
             relation = relations.get(reference)
@@ -173,19 +174,72 @@ def _vml_length(value: str) -> int:
     return int(Decimal(match[1]) * factors[match[2]])
 
 
+def svg_dimensions(data: bytes) -> tuple[int, int]:
+    """读取 SVG 的明确像素或物理尺寸，百分比尺寸不猜测。"""
+    if b"<!DOCTYPE" in data.upper() or b"<!ENTITY" in data.upper():
+        return 0, 0
+    try:
+        root = ET.fromstring(data)
+    except ET.ParseError:
+        return 0, 0
+    if root.tag != "{http://www.w3.org/2000/svg}svg":
+        return 0, 0
+    dimensions = []
+    for key in ("width", "height"):
+        value = root.get(key, "").strip()
+        if re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", value):
+            value += "px"
+        dimensions.append(_vml_length(value) // 9525)
+    return tuple(dimensions) if all(dimensions) else (0, 0)
+
+
+def bmp_dimensions(data: bytes) -> tuple[int, int]:
+    """读取 BMP 核心或信息头尺寸，负高度表示自上而下存储。"""
+    if not data.startswith(b"BM") or len(data) < 26:
+        return 0, 0
+    size = int.from_bytes(data[14:18], "little")
+    if size == 12:
+        width, height = struct.unpack("<HH", data[18:22])
+    elif size >= 40 and 14 + size <= len(data):
+        width, height = struct.unpack("<ii", data[18:26])
+        height = abs(height)
+    else:
+        return 0, 0
+    return (width, height) if width > 0 and height > 0 else (0, 0)
+
+
+def tiff_dimensions(data: bytes) -> tuple[int, int]:
+    """从经典 TIFF 第一目录读取尺寸，不解码像素或遍历后续页面。"""
+    if len(data) < 8 or data[:4] not in {b"II*\x00", b"MM\x00*"}:
+        return 0, 0
+    order = "little" if data[:2] == b"II" else "big"
+    offset = int.from_bytes(data[4:8], order)
+    if offset < 8 or offset + 2 > len(data):
+        return 0, 0
+    count = int.from_bytes(data[offset:offset + 2], order)
+    if offset + 2 + count * 12 + 4 > len(data):
+        return 0, 0
+    dimensions = {}
+    for index in range(count):
+        entry = data[offset + 2 + index * 12:offset + 14 + index * 12]
+        tag, kind = int.from_bytes(entry[:2], order), int.from_bytes(entry[2:4], order)
+        if tag in {256, 257}:
+            if tag in dimensions or kind not in {3, 4} or int.from_bytes(entry[4:8], order) != 1:
+                return 0, 0
+            dimensions[tag] = int.from_bytes(entry[8:10] if kind == 3 else entry[8:12], order)
+    return dimensions.get(256, 0), dimensions.get(257, 0)
+
+
 def _raster_dimensions(data: bytes) -> tuple[int, int]:
     """仅从常见光栅图片头读取尺寸，不解码或重采样图片。"""
+    if data[:4] in {b"II*\x00", b"MM\x00*"}:
+        return tiff_dimensions(data)
     if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24:
         return struct.unpack(">II", data[16:24])
     if data[:6] in {b"GIF87a", b"GIF89a"} and len(data) >= 10:
         return struct.unpack("<HH", data[6:10])
     if data.startswith(b"BM") and len(data) >= 26:
-        size = struct.unpack("<I", data[14:18])[0]
-        if size == 12:
-            return struct.unpack("<HH", data[18:22])
-        if size >= 40:
-            width, height = struct.unpack("<ii", data[18:26])
-            return width, abs(height)
+        return bmp_dimensions(data)
     if data.startswith(b"\xff\xd8"):
         position = 2
         while position + 4 <= len(data):
@@ -293,7 +347,7 @@ def word_images(path: Path, element: ET.Element, source_part: str = "word/docume
             if not data:
                 raise ValueError("文档图片部件为空")
             if width <= 0 or height <= 0:
-                intrinsic_width, intrinsic_height = _raster_dimensions(data)
+                intrinsic_width, intrinsic_height = svg_dimensions(data) if extension == "svg" else _raster_dimensions(data)
                 if intrinsic_width <= 0 or intrinsic_height <= 0:
                     raise ValueError("文档图片缺少可用显示尺寸")
                 if width > 0:
@@ -304,6 +358,17 @@ def word_images(path: Path, element: ET.Element, source_part: str = "word/docume
                     width, height = intrinsic_width * 9525, intrinsic_height * 9525
             images.append({"data": base64.b64encode(data).decode("ascii"), "extension": extension,
                            "width": width, "height": height, "crop": crop, "transform": transform})
+            svg = node.find(".//{http://schemas.microsoft.com/office/drawing/2016/SVG/main}svgBlip")
+            if svg is not None:
+                # 备用位图与 SVG 原图共用一个图片对象。
+                alternative = copy.deepcopy(shape)
+                alternate_blip = alternative.find(".//{*}blip")
+                alternate_blip.clear()
+                alternate_blip.set(RELATION + "embed", svg.get(RELATION + "embed", ""))
+                vector = word_images(path, alternative, source_part)
+                if len(vector) != 1 or vector[0]["extension"] != "svg":
+                    raise ValueError("SVG 原图关系无效")
+                images[-1]["svg"] = vector[0]
     return images
 
 
@@ -324,12 +389,13 @@ def picture_xml(image: dict) -> str:
     transform_xml = " ".join(f'{key}="{int(transform[key])}"' for key in ("rot", "flipH", "flipV") if key in transform)
     width, height = max(1, int(width * scale)), max(1, int(height * scale))
     x, y = 457200 + (8229600 - width) // 2, 1463040 + (4937760 - height) // 2
-    return f'<p:pic><p:nvPicPr><p:cNvPr id="5" name="Picture"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="image"/>{crop_xml}<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm {transform_xml}><a:off x="{x}" y="{y}"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'
+    svg_xml = '<a:extLst><a:ext uri="{96DAC541-7B7A-43D3-8B79-37D633B846F1}"><asvg:svgBlip xmlns:asvg="http://schemas.microsoft.com/office/drawing/2016/SVG/main" r:embed="svg"/></a:ext></a:extLst>' if image.get("svg") else ""
+    return f'<p:pic><p:nvPicPr><p:cNvPr id="5" name="Picture"/><p:cNvPicPr><a:picLocks noChangeAspect="1"/></p:cNvPicPr><p:nvPr/></p:nvPicPr><p:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="image">{svg_xml}</a:blip>{crop_xml}<a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm {transform_xml}><a:off x="{x}" y="{y}"/><a:ext cx="{width}" cy="{height}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'
 
 
 def word_picture_xml(image: dict, index: int) -> str:
     """把内嵌图片写为 Word 行内绘图，复用裁剪与变换属性。"""
-    picture = picture_xml(image).replace("<p:", "<pic:").replace("</p:", "</pic:").replace('r:embed="image"', f'r:embed="image{index}"')
+    picture = picture_xml(image).replace("<p:", "<pic:").replace("</p:", "</pic:").replace('r:embed="image"', f'r:embed="image{index}"').replace('r:embed="svg"', f'r:embed="svg{index}"')
     # 使用源显示尺寸，正文宽度和高度不足时才缩小。
     root = ET.fromstring(f'<root xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">{picture}</root>')
     extent = root.find(".//{*}xfrm/{*}ext")

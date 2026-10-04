@@ -10,7 +10,7 @@ from typing import Any
 from xml.etree import ElementTree as ET
 
 from .converters import extract_docx_blocks, extract_pptx_slides, extract_xlsx_sheets
-from .media import image_locations
+from .media import bmp_dimensions, image_locations, svg_dimensions, tiff_dimensions
 
 
 def build_file_preview(file: dict[str, Any]) -> dict[str, Any]:
@@ -335,9 +335,18 @@ def _image_dimensions(data: bytes) -> tuple[int, int, str] | None:
     if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
         return int.from_bytes(data[6:8], "little"), int.from_bytes(data[8:10], "little"), "gif"
     if data.startswith(b"BM") and len(data) >= 26:
-        return int.from_bytes(data[18:22], "little"), int.from_bytes(data[22:26], "little"), "bmp"
+        width, height = bmp_dimensions(data)
+        return (width, height, "bmp") if width > 0 and height > 0 else None
     if data.startswith(b"\xff\xd8"):
         return _jpeg_dimensions(data)
+    if data[:4] in {b"II*\x00", b"MM\x00*"}:
+        width, height = tiff_dimensions(data)
+        if width > 0 and height > 0:
+            return width, height, "tiff"
+    if data.lstrip().startswith(b"<"):
+        width, height = svg_dimensions(data)
+        if width > 0 and height > 0:
+            return width, height, "svg"
     return None
 
 

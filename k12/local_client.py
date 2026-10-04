@@ -325,11 +325,27 @@ end run"""
         return """on run argv
 set sourceFile to POSIX file (item 1 of argv)
 set targetFile to item 2 of argv
+set sourceName to sourceFile as text
+set documentRef to missing value
 tell application \"Microsoft Word\"
+repeat with existingDocument in documents
+if full name of existingDocument is sourceName then error "Source document is already open"
+end repeat
+try
 open sourceFile
+set candidateDocument to active document
+if full name of candidateDocument is not sourceName then error "Opened document ownership mismatch"
 set documentRef to active document
 save as documentRef file name targetFile file format format document
 close documentRef saving no
+on error errorMessage number errorNumber
+if documentRef is not missing value then
+try
+close documentRef saving no
+end try
+end if
+error errorMessage number errorNumber
+end try
 end tell
 end run"""
     return """on run argv

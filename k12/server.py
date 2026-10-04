@@ -166,6 +166,11 @@ class K12RequestHandler(BaseHTTPRequestHandler):
                     self._json(self.processor.delete_report(parts[2]))
                 except ValueError as exc:
                     raise JsonError(400, str(exc)) from exc
+            elif len(parts) == 4 and parts[:3] == ["api", "macros", "sources"]:
+                try:
+                    self._json({"deleted": self.processor.delete_macro_source(parts[3])})
+                except ValueError as exc:
+                    raise JsonError(400, str(exc)) from exc
             elif len(parts) == 3 and parts[:2] == ["api", "macro-templates"]:
                 try:
                     deleted = self.processor.delete_macro_template(parts[2])
@@ -248,7 +253,8 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             except KeyError as exc:
                 raise JsonError(404, "Task not found") from exc
         elif path == "/api/reports":
-            self._json({"reports": [self._public_payload(report) for report in self.store.list_reports()]})
+            task_id = query.get("task_id", [None])[0]
+            self._json({"reports": [self._public_payload(report) for report in self.store.list_reports(task_id)]})
         elif path == "/api/logs":
             task_id = query.get("task_id", [None])[0]
             self._json({"logs": [self._public_log(log) for log in self.store.list_logs(task_id)]})
@@ -305,6 +311,14 @@ class K12RequestHandler(BaseHTTPRequestHandler):
             self._send_installer(path.removeprefix("/api/installers/"), query)
         elif path == "/api/macros":
             self._json({"macros": self.processor.macro_library()})
+        elif path.startswith("/api/macros/sources/"):
+            parts = path.strip("/").split("/")
+            if len(parts) != 4:
+                raise JsonError(404, "宏来源接口不存在")
+            try:
+                self._json({"source": self.processor.macro_source_definition(parts[3])})
+            except ValueError as exc:
+                raise JsonError(400, str(exc)) from exc
         elif path == "/api/macro-templates":
             self._json({"templates": self.processor.list_macro_templates()})
         elif path == "/api/users":
@@ -469,6 +483,11 @@ class K12RequestHandler(BaseHTTPRequestHandler):
                 raise JsonError(400, str(exc)) from exc
         elif path == "/api/maintenance/cleanup":
             self._json(self.processor.cleanup_runtime_history(payload))
+        elif path == "/api/macros/import":
+            try:
+                self._json({"source": self.processor.import_macro_source(payload)}, 201)
+            except ValueError as exc:
+                raise JsonError(400, str(exc)) from exc
         elif path == "/api/macro-templates":
             try:
                 self._json({"template": self.processor.save_macro_template(payload)}, 201)

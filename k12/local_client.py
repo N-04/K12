@@ -1,4 +1,4 @@
-"""提供 K12 本地伴随客户端。支持心跳、任务载荷、脱敏报告、模拟执行同步和显式授权的文件复制。Windows Office COM 与 macOS AppleScript 仅在同时指定两个执行标志后转换旧 Word/PPT 文档。MathType、OMML 写回与 Word 宏仍禁用。"""
+"""提供 K12 本地伴随客户端。支持心跳、任务载荷、脱敏报告、模拟执行同步和显式授权的文件复制。Windows Office COM 支持旧 Word/PPT/Excel，macOS AppleScript 支持旧 Word/PPT/Excel；仅在同时指定两个执行标志后执行。MathType、OMML 写回与 Word 宏仍禁用。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import os
+import posixpath
 import platform
 import re
 import shutil
@@ -14,19 +15,25 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
 from .converters import (
     build_docx_from_slides,
+    build_docx_from_xlsx,
+    build_pdf_from_xlsx,
+    build_pptx_from_xlsx,
+    extract_xlsx_sheets,
     build_pptx_from_docx,
     extract_docx_blocks,
     extract_docx_object_summary,
     extract_pptx_slides,
 )
+from .excel import select_excel_sheets
 from .install_profiles import normalize_platform
 
 
@@ -38,6 +45,7 @@ SAFE_NATIVE_ACTION_TYPES = {"office_conversion", "omml_mathtype", "pdf_formula_m
 MACOS_OFFICE_APPS = {
     "word": Path("/Applications/Microsoft Word.app"),
     "powerpoint": Path("/Applications/Microsoft PowerPoint.app"),
+    "excel": Path("/Applications/Microsoft Excel.app"),
 }
 
 
@@ -180,19 +188,23 @@ def normalize_macos_office_document(
 ) -> dict[str, Any]:
     """显式调用 Office for Mac，将旧文档规范化为 OOXML。"""
     app_key = str(application or "").lower()
-    expected_suffix = {"word": ".docx", "powerpoint": ".pptx"}.get(app_key)
+    expected_suffix = {"word": ".docx", "powerpoint": ".pptx", "excel": ".xlsx"}.get(app_key)
     if not expected_suffix:
-        raise LocalClientError("macOS Office 适配器仅支持 Word 或 PowerPoint")
+        raise LocalClientError("macOS Office 适配器仅支持 Word、PowerPoint 或 Excel")
     if not macos_office_adapter_available(app_key):
         raise LocalClientError(f"macOS Office 适配器不可用：{app_key}")
     source_path = source.expanduser().resolve()
     target_path = target.expanduser().resolve()
     if not source_path.is_file():
         raise LocalClientError("Office 转换源文件不存在")
+    if app_key == "excel" and source_path.suffix.lower() not in {".xls", ".xlsx"}:
+        raise LocalClientError("Excel 规范化源文件必须为 .xls 或 .xlsx")
     if target_path.suffix.lower() != expected_suffix:
         raise LocalClientError(f"Office 规范化输出必须为 {expected_suffix}")
     if source_path == target_path:
         raise LocalClientError("Office 规范化不能覆盖输入文件")
+    if target_path.exists():
+        raise LocalClientError("Office 输出已存在，拒绝覆盖")
     target_path.parent.mkdir(parents=True, exist_ok=True)
     script = _macos_office_normalize_script(app_key)
     try:
@@ -204,11 +216,13 @@ def normalize_macos_office_document(
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        target_path.unlink(missing_ok=True)
         raise LocalClientError(f"macOS Office 执行失败：{exc.__class__.__name__}") from exc
     if completed.returncode != 0:
-        message = re.sub(r"\s+", " ", str(completed.stderr or completed.stdout or "Office AppleScript 返回失败")).strip()
-        raise LocalClientError(f"macOS Office 执行失败：{message[:240]}")
+        target_path.unlink(missing_ok=True)
+        raise LocalClientError("macOS Office 执行失败，请检查 Office 授权及文件是否可打开")
     if not target_path.is_file() or target_path.stat().st_size <= 0:
+        target_path.unlink(missing_ok=True)
         raise LocalClientError("macOS Office 未生成规范化输出")
     validation_error = _macos_office_output_validation_error(target_path, expected_suffix)
     if validation_error:
@@ -228,6 +242,12 @@ def normalize_macos_office_document(
 
 def _macos_office_output_validation_error(path: Path, suffix: str) -> str:
     """检查 Office 生成的 OOXML 包是否完整且未损坏。"""
+    if suffix == ".pdf":
+        try:
+            data = path.read_bytes()
+            return "" if data.startswith(b"%PDF-") and b"%%EOF" in data[-2048:] else "输出不是完整 PDF"
+        except OSError:
+            return "输出无法读取"
     required = {
         ".docx": {"[Content_Types].xml", "word/document.xml"},
         ".pptx": {"[Content_Types].xml", "ppt/presentation.xml"},
@@ -237,18 +257,70 @@ def _macos_office_output_validation_error(path: Path, suffix: str) -> str:
         with zipfile.ZipFile(path) as archive:
             names = set(archive.namelist())
             corrupt = archive.testzip()
-    except (OSError, zipfile.BadZipFile):
+            if len(names) != len(archive.namelist()):
+                return "OOXML 输出包含重复部件"
+            for name in names:
+                if not name.endswith(".rels"):
+                    continue
+                folder, filename = posixpath.split(name)
+                source_folder = posixpath.dirname(folder)
+                if filename == ".rels":
+                    source_folder = ""
+                for relation in ET.fromstring(archive.read(name)):
+                    if relation.get("TargetMode") == "External":
+                        continue
+                    target = relation.get("Target", "")
+                    uri = urlsplit(target)
+                    if uri.scheme or uri.netloc or uri.query:
+                        return "OOXML 输出内部关系目标缺失或无效"
+                    # 定位片段不属于部件名；仅有片段时指向当前源部件。
+                    target_part = uri.path or (filename[:-5] if uri.fragment and filename != ".rels" else "")
+                    resolved = posixpath.normpath(posixpath.join(source_folder, target_part)) if not target_part.startswith("/") else target_part.lstrip("/")
+                    if not target_part or "\\" in resolved or resolved.startswith("../") or resolved not in names:
+                        return "OOXML 输出内部关系目标缺失或无效"
+    except (OSError, zipfile.BadZipFile, ET.ParseError, ValueError):
         return "输出不是可打开的 OOXML ZIP"
     missing = sorted(required - names)
     if missing:
         return f"缺少关键部件：{', '.join(missing)}"
     if corrupt:
         return f"ZIP CRC 校验失败：{Path(corrupt).name}"
+    if suffix == ".xlsx":
+        try:
+            with zipfile.ZipFile(path) as archive:
+                workbook = ET.fromstring(archive.read("xl/workbook.xml"))
+                if not any(name.startswith("xl/worksheets/") and name.endswith(".xml") for name in archive.namelist()):
+                    return "Excel 输出工作表结构或关系无效"
+            if not workbook.findall(".//{*}sheets/{*}sheet"):
+                return "Excel 输出没有工作表"
+            extract_xlsx_sheets(path)
+        except (OSError, KeyError, ValueError, ET.ParseError, zipfile.BadZipFile):
+            return "Excel 输出工作表结构或关系无效"
     return ""
 
 
 def _macos_office_normalize_script(application: str) -> str:
     """生成参数驱动的 AppleScript，不把本地路径插入脚本代码。"""
+    if application == "excel":
+        return """on run argv
+set sourceFile to (POSIX file (item 1 of argv)) as text
+set targetFile to (POSIX file (item 2 of argv)) as text
+set workbookRef to missing value
+tell application "Microsoft Excel"
+try
+set workbookRef to open workbook workbook file name sourceFile update links do not update links read only true editable true add to mru false
+save workbook as workbookRef filename targetFile file format Excel XML file format
+close workbookRef saving no
+on error errorMessage number errorNumber
+if workbookRef is not missing value then
+try
+close workbookRef saving no
+end try
+end if
+error errorMessage number errorNumber
+end try
+end tell
+end run"""
     if application == "word":
         return """on run argv
 set sourceFile to POSIX file (item 1 of argv)
@@ -278,7 +350,7 @@ def execute_macos_office_task(payload: dict[str, Any], allow_native_execution: b
 
 
 def execute_windows_office_task(payload: dict[str, Any], allow_native_execution: bool = False) -> dict[str, Any]:
-    """在 Windows 上执行经过授权的旧 Word/PPT 转换，批量失败时回滚产物。"""
+    """在 Windows 上执行经过授权的旧 Word/PPT/Excel 转换，批量失败时回滚产物。"""
     return _execute_office_task(payload, allow_native_execution, "Windows")
 
 
@@ -322,7 +394,10 @@ def _execute_office_task(payload: dict[str, Any], allow_native_execution: bool, 
         if not file_id or file_id not in by_id:
             raise LocalClientError("Office 待执行清单引用了不存在的文件")
         if file_id not in selected:
-            files.append(by_id[file_id])
+            selected_file = dict(by_id[file_id])
+            selected_file["conversion_settings"] = item.get("conversion_settings") or {}
+            selected_file["excel_options"] = item.get("excel_options") or {}
+            files.append(selected_file)
             selected.add(file_id)
     outputs: list[dict[str, Any]] = []
     failures: list[str] = []
@@ -404,22 +479,57 @@ def _execute_macos_office_file(file: dict[str, Any], task_type: str, output_root
         application, intermediate_suffix, final_suffix = "word", ".docx", ".pptx"
     elif task_type == "ppt_to_word" and extension == ".ppt":
         application, intermediate_suffix, final_suffix = "powerpoint", ".pptx", ".docx"
+    elif task_type in {"excel_to_pdf", "excel_to_word", "excel_to_ppt"} and extension == ".xls":
+        application, intermediate_suffix = "excel", ".xlsx"
+        final_suffix = {"excel_to_pdf": ".pdf", "excel_to_word": ".docx", "excel_to_ppt": ".pptx"}[task_type]
     else:
-        raise LocalClientError("当前 macOS Office 适配器不支持该任务与文件格式组合")
+        raise LocalClientError(f"当前 {platform_name} Office 适配器不支持该任务与文件格式组合")
     intermediate = output_root / f".native-{file_id}{intermediate_suffix}"
     target = output_root / f"{stem}-{file_id}{final_suffix}"
     if target.exists() or intermediate.exists():
         raise LocalClientError("Office 目标文件已存在，拒绝覆盖未确认产物")
+    warnings = []
     try:
         normalizer = normalize_windows_office_document if platform_name == "Windows" else normalize_macos_office_document
         normalizer(source, intermediate, application)
         if task_type == "word_to_ppt":
-            blocks = extract_docx_blocks(intermediate)
+            blocks = extract_docx_blocks(intermediate, retain_images=bool((file.get("conversion_settings") or {}).get("retain_images", True)))
             objects = extract_docx_object_summary(intermediate)
-            build_pptx_from_docx(blocks, target, object_preservation={"source": objects})
+            settings = file.get("conversion_settings") or {}
+            warnings = build_pptx_from_docx(
+                blocks, target,
+                max_chars=int(settings.get("word_max_chars_per_slide", 320) or 320),
+                auto_pagination=bool(settings.get("word_auto_pagination", True)),
+                generate_toc=bool(settings.get("word_generate_toc", False)),
+                object_preservation={"source": objects},
+                retain_tables=bool(settings.get("retain_tables", True)),
+                retain_images=bool(settings.get("retain_images", True)),
+            ) or []
+        elif application == "excel":
+            settings = file.get("conversion_settings") or {}
+            options = file.get("excel_options") or {}
+            defaults = {"excelConversionRange": settings.get("excel_conversion_range", "全部工作表"),
+                        "excelFormulaMode": settings.get("excel_formula_mode", "保留公式"),
+                        "retainComments": settings.get("excel_retain_comments", False)}
+            if options.get("splitSheets", options.get("splitWorksheets", settings.get("excel_split_sheets", False))):
+                raise LocalClientError("旧 Excel 分表输出尚未支持，请关闭拆分工作表后重试")
+            sheets = select_excel_sheets(extract_xlsx_sheets(intermediate), options, defaults)
+            builder = {"excel_to_pdf": build_pdf_from_xlsx, "excel_to_word": build_docx_from_xlsx,
+                       "excel_to_ppt": build_pptx_from_xlsx}[task_type]
+            warnings = builder(sheets, target, str(file.get("file_name") or source.name)) or []
         else:
-            slides = extract_pptx_slides(intermediate)
-            build_docx_from_slides(slides, target)
+            slides = extract_pptx_slides(intermediate, retain_images=bool((file.get("conversion_settings") or {}).get("ppt_retain_images", True)))
+            settings = file.get("conversion_settings") or {}
+            warnings = build_docx_from_slides(
+                slides, target,
+                mode=str(settings.get("ppt_to_word_mode") or "逐页讲义模式"),
+                generate_toc=bool(settings.get("ppt_to_word_generate_toc", True)),
+                template_name=str(settings.get("ppt_to_word_template") or ""),
+                include_notes=bool(settings.get("ppt_extract_notes", True)),
+                retain_images=bool(settings.get("ppt_retain_images", True)),
+                retain_formulas=bool(settings.get("ppt_retain_formulas", True)),
+                retain_tables=bool(settings.get("ppt_retain_tables", True)),
+            ) or []
         validation_error = _macos_office_output_validation_error(target, final_suffix)
         if validation_error:
             raise LocalClientError(f"最终转换产物校验失败：{validation_error}")
@@ -431,6 +541,7 @@ def _execute_macos_office_file(file: dict[str, Any], task_type: str, output_root
             "path": str(target),
             "size": len(output_data),
             "sha256": hashlib.sha256(output_data).hexdigest(),
+            "message": "提示：" + "；".join(warnings) if warnings else "",
             "native_execution_performed": True,
         }
     except (LocalClientError, OSError, ValueError, zipfile.BadZipFile) as exc:
@@ -504,6 +615,7 @@ def build_component_preflight(platform_name: str = "") -> dict[str, Any]:
         and (
             (components["word"]["available"] and macos_office_adapter_available("word"))
             or (components["powerpoint"]["available"] and macos_office_adapter_available("powerpoint"))
+            or (components["excel"]["available"] and macos_office_adapter_available("excel"))
         )
     )
     return {
@@ -1441,9 +1553,9 @@ def _native_runner_profile(detected_platform: str) -> dict[str, Any]:
             "platform": "macOS",
             "support_level": "macos_office_applescript_adapter",
             "native_document_runner_available": bool(
-                macos_office_adapter_available("word") or macos_office_adapter_available("powerpoint")
+                any(macos_office_adapter_available(app) for app in ("word", "powerpoint", "excel"))
             ),
-            "office_automation_adapter": "Office for Mac AppleScript：旧 Word/PPT 规范化后进入 K12 转换器",
+            "office_automation_adapter": "Office for Mac AppleScript：旧 Word/PPT/Excel 规范化后进入 K12 转换器",
             "mathtype_adapter": "受限：仅登记 macOS MathType 同平台合同和兜底格式",
             "macro_adapter": "不可直接执行 Word 宏",
             "supported_operations": [
@@ -1841,7 +1953,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sync-dry-run", action="store_true", help="sync a running status without executing native document actions")
     parser.add_argument("--native-plan", action="store_true", help="include a native execution request contract without executing native document actions")
     parser.add_argument("--allow-native-execution", action="store_true", help="explicitly authorize a requested native action; execution still requires a separate --execute-* flag")
-    parser.add_argument("--execute-native-office", action="store_true", help="执行当前平台支持的旧 Word/PPT 转换；同时需要 --allow-native-execution")
+    parser.add_argument("--execute-native-office", action="store_true", help="执行当前平台支持的旧 Word/PPT/Excel 转换；同时需要 --allow-native-execution")
     parser.add_argument("--native-report-json", default="", help="read a trusted native runner result JSON and sync a redacted k12.localNativeExecutionReport.v1")
     parser.add_argument("--execute-file-actions", action="store_true", help="execute safe local file actions such as OMML dependency copy; does not execute Office, MathType, or Word macros")
     parser.add_argument("--result-upload-requested", action="store_true", help="mark result upload intent during dry-run sync")

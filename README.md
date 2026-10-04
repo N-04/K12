@@ -39,14 +39,16 @@ K12 是一个本地优先的文档处理工作台，用于集中处理 Word、Ex
 - 用户取消或本地客户端回传取消会把待处理 artifact 终结为 `local_execution_cancelled`，单独统计取消文件并重写报告；取消既不冒充成功，也不污染失败清单。
 - Mathpix PDF OCR 需要显式授权并配置 `MATHPIX_APP_ID`、`MATHPIX_APP_KEY`。
 - 纯文本层 PDF 会在本地解析普通或 Flate 压缩内容流中的 `Tj` / `TJ` 文本并生成 DOCX，支持 PDF 转义、UTF-8、带 BOM 的 UTF-16 十六进制字符串和连续 `TJ` 字形片段。本地解析限制源文件 50 MiB、单流展开 10 MiB、累计流展开 25 MiB 和 1000 个流，超限内容不会进入本地转换。扫描型、混合型、含图片、公式或表格的 PDF 仍走 Mathpix 识别合同。每个 Mathpix 作业会记录 `task_option_audit`（`k12.mathpixTaskOptionAudit.v1`），审计任务参数中的 `allowExternalMathpixUpload`、`externalUploadAuthorized` 等伪授权键，并声明外部上传授权只能来自 `settings.allowExternalMathpixUpload`。
-- Windows 已接入 PowerShell / Office COM 的旧 Word/PPT 规范化与任务同步；本机真实 Office 测试尚未通过，见 [Windows 验证记录](docs/windows-verification.md)。MathType 原生对象写回和真实宏执行仍需要独立适配器。
-- macOS 已接入 Word/PowerPoint AppleScript 任务适配器：只有同时传入 `--allow-native-execution --execute-native-office` 才会执行旧 Word/PPT 转换；输入使用任务快照，本地路径不插入脚本，最终产物写入任务受管目录并通过 OOXML、ZIP CRC、大小和 SHA-256 校验，再携带脱敏原生报告与输出摘要同步。
+- Windows 已接入 PowerShell / Office COM 的旧 Word/PPT/Excel 规范化与任务同步；本机真实 Office 测试尚未通过，见 [Windows 验证记录](docs/windows-verification.md)。MathType 原生对象写回和真实宏执行仍需要独立适配器。
+- macOS 已接入 Word/PowerPoint/Excel AppleScript 任务适配器：只有同时传入 `--allow-native-execution --execute-native-office` 才会执行旧 Word/PPT/Excel 转换；输入使用任务快照，本地路径不插入脚本，最终产物写入任务受管目录并通过 OOXML、ZIP CRC、大小和 SHA-256 校验，再携带脱敏原生报告与输出摘要同步。
 - macOS Office 输入解析真实路径后必须是任务输出目录下 `.inputs/` 的直接文件；外部路径、嵌套路径和指向目录外的符号链接即使哈希正确也不会启动 Office。
 - macOS Office 批量执行采用原子提交：本轮任一文件失败会删除已生成的本轮最终产物，只有全部文件成功才向 `local-sync` 提交输出；回滚只允许删除任务输出根目录的直接文件。
 - 当前机器的 Word、PowerPoint 和真实旧 PPT 二段转换证据记录在 `docs/native-verification.md`；文档同时保留真实旧 Word 输入尚未闭环的限制。
 - 运行数据写入 `.k12-data/`，该目录用于本地 SQLite、上传缓存、报告和输出文件。
 
 ## 运行
+
+macOS 可双击 `start-macos.command`，Windows 可双击 `start-windows.cmd`。两端均需 Python 3.11 或更高版本；详见 [macOS 使用说明](docs/macos-usage.md) 和 [Windows 使用说明](docs/windows-usage.md)。
 
 Windows 用户可双击 `start-windows.cmd`，或运行 `.\.venv\Scripts\python.exe -m k12 --open-browser`。详细的安装、原生执行和测试说明见 [Windows 使用说明](docs/windows-usage.md)。
 
@@ -92,7 +94,7 @@ K12_LOCAL_TOKEN="你的本地安全令牌" python3 -m k12.local_client --origin 
 K12_LOCAL_TOKEN="你的本地安全令牌" python3 -m k12.local_client --origin http://127.0.0.1:8765 --native-plan --allow-native-execution
 ```
 
-在 macOS 上显式执行受支持的旧 Word/PPT Office 转换并同步结果：
+在 macOS 上显式执行受支持的旧 Word/PPT/Excel Office 转换并同步结果：
 
 ```bash
 K12_LOCAL_TOKEN="你的本地安全令牌" python3 -m k12.local_client --origin http://127.0.0.1:8765 --allow-native-execution --execute-native-office

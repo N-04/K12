@@ -271,6 +271,21 @@
               </div>
             </section>
 
+            <section class="panel wide-panel excel-workspace">
+              <div class="panel-header">
+                <div><h2>Excel 转换参数</h2><span>用于 Excel 转 PDF、Word 和 PPT，也适用于批量任务中的 Excel 转换</span></div>
+              </div>
+              <div class="settings-grid">
+                <label><span>转换范围</span><select id="excelTaskRange"><option value="">继承设置</option><option>全部工作表</option><option>当前工作表</option><option>选区</option></select></label>
+                <label><span>指定工作表名称</span><input id="excelTaskSheets" type="text" placeholder="例如：成绩，汇总；留空按转换范围处理" /></label>
+                <label><span>单元格选区</span><input id="excelTaskCells" type="text" placeholder="例如：A1:D10，F2；填写后按选区转换" /></label>
+                <label><span>公式模式</span><select id="excelTaskFormulaMode"><option value="">继承设置</option><option>保留公式</option><option>仅保留计算结果</option></select></label>
+                <label><span>保留批注正文</span><select id="excelTaskComments"><option value="">继承设置</option><option value="true">保留</option><option value="false">不保留</option></select></label>
+                <label><span>拆分工作表</span><select id="excelTaskSplit"><option value="">继承设置</option><option value="true">每个工作表单独输出</option><option value="false">合并为一个文件</option></select></label>
+              </div>
+              <p class="muted">工作表名称用逗号分隔；选区支持单元格与矩形范围。当前工作表为文件中的第一张表；选择选区但未填写单元格时，仅转换前 12 个单元格。</p>
+            </section>
+
             <section class="panel wide-panel word-workspace">
               <div class="panel-header">
                 <div>

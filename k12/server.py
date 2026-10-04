@@ -1351,13 +1351,18 @@ class K12Server(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], handler_class: type[K12RequestHandler], data_dir: Path) -> None:
         """初始化当前对象所需的配置、依赖与运行状态。"""
         super().__init__(server_address, handler_class)
-        self.store = AppStore(data_dir)
-        self.processor = TaskProcessor(self.store)
-        self.processor.recover_interrupted_tasks()
         try:
-            self.processor.auto_cleanup_runtime_history()
-        except Exception as exc:  # pragma: no cover  # 未预期异常的接口兜底。
-            self.store.append_log("system", f"自动清理失败：{exc}", "error")
+            self.store = AppStore(data_dir)
+            self.processor = TaskProcessor(self.store)
+            self.processor.recover_interrupted_tasks()
+            try:
+                self.processor.auto_cleanup_runtime_history()
+            except Exception as exc:  # pragma: no cover  # 未预期异常的接口兜底。
+                self.store.append_log("system", f"自动清理失败：{exc}", "error")
+        except Exception:
+            # 初始化失败也释放监听端口，避免影响下一次启动。
+            self.server_close()
+            raise
 
 
 def main() -> None:

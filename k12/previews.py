@@ -7,8 +7,10 @@ import re
 import zipfile
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
 
 from .converters import extract_docx_blocks, extract_pptx_slides, extract_xlsx_sheets
+from .media import image_locations
 
 
 def build_file_preview(file: dict[str, Any]) -> dict[str, Any]:
@@ -57,6 +59,19 @@ def build_file_preview(file: dict[str, Any]) -> dict[str, Any]:
         preview["status"] = "error"
         preview["warnings"].append(f"预览生成失败：{exc}")
         preview["pages"] = _metadata_pages(file)
+    if preview["status"] == "ready" and zipfile.is_zipfile(path):
+        try:
+            with zipfile.ZipFile(path) as archive:
+                locations = image_locations(archive)
+            entries = [(media, location) for media, values in locations.items() for location in values]
+            for media, location in entries[:200]:
+                preview["pages"].append({"index": len(preview["pages"]) + 1, "title": location,
+                                         "kind": "图片来源记录", "text": f"{location}\n媒体部件：{media}",
+                                         "source_name": media, "location": location})
+            if len(entries) > 200:
+                preview["warnings"].append("预览仅显示前 200 处图片来源，完整位置请查看图片报告")
+        except (OSError, KeyError, ValueError, ET.ParseError, zipfile.BadZipFile) as exc:
+            preview["warnings"].append(f"图片来源预览失败：{exc}")
     return _attach_preview_markers(preview, file)
 
 

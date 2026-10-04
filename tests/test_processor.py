@@ -4857,7 +4857,7 @@ class TaskProcessorTests(unittest.TestCase):
             processor = TaskProcessor(store)
             word = processor.create_uploaded_file("lesson.docx", make_docx_bytes())[0]
 
-            def write_invalid_pptx(_blocks, target, *_args) -> None:
+            def write_invalid_pptx(_blocks, target, *_args, **_kwargs) -> None:
                 target.write_bytes(b"not-an-ooxml-package")
 
             with patch("k12.processor.build_pptx_from_docx", side_effect=write_invalid_pptx):
@@ -5770,7 +5770,7 @@ class TaskProcessorTests(unittest.TestCase):
         self.assertIn("查看替换素材", app_js)
         self.assertIn("function markImageLocationUnknown", app_js)
         self.assertIn('"位置未知"', app_js)
-        self.assertIn("来源预览中未命中图片位置", app_js)
+        self.assertIn("当前位置记录未包含在预览中", app_js)
         self.assertIn("button.dataset.report, button.dataset.id", app_js)
         self.assertIn("duplicate_check_status", app_js)
         self.assertIn("duplicate_fallback", app_js)
@@ -6214,8 +6214,30 @@ class TaskProcessorTests(unittest.TestCase):
             artifact = store.list_reports()[0]["analysis"]["artifacts"][0]
             with zipfile.ZipFile(artifact["path"]) as archive:
                 document_xml = archive.read("word/document.xml").decode("utf-8")
+            self.assertEqual(artifact["conversion_settings"]["excel_formula_mode"], "保留公式")
             self.assertIn("公式模式：保留公式", document_xml)
             self.assertIn("B3: 98 (=SUM(B2))", document_xml)
+
+    def test_excel_task_overrides_match_report_and_output(self) -> None:
+        """任务覆盖后的范围、公式与分表选项应与产物报告一致。"""
+        with tempfile.TemporaryDirectory() as tmp:
+            store = AppStore(tmp)
+            store.update_settings({"excelConversionRange": "全部工作表", "excelFormulaMode": "保留公式", "excelSplitSheets": True})
+            processor = TaskProcessor(store)
+            excel = processor.create_uploaded_file("scores.xlsx", make_xlsx_bytes())[0]
+            processor.create_task({"task_type": "excel_to_word", "file_ids": [excel["id"]], "options": {"excel": {
+                "conversionRange": "选区", "cellRefs": ["B3"], "retainFormulas": False, "splitWorksheets": False,
+            }}})
+            artifact = store.list_reports()[0]["analysis"]["artifacts"][0]
+            snapshot = artifact["conversion_settings"]
+            self.assertEqual(snapshot["excel_conversion_range"], "选区")
+            self.assertEqual(snapshot["excel_formula_mode"], "仅保留计算结果")
+            self.assertFalse(snapshot["excel_split_sheets"])
+            with zipfile.ZipFile(artifact["path"]) as archive:
+                xml = archive.read("word/document.xml").decode("utf-8")
+            self.assertIn("B3: 98", xml)
+            self.assertNotIn("SUM(B2)", xml)
+            self.assertNotIn("A2: Alice", xml)
 
     def test_excel_split_sheets_generates_one_artifact_per_sheet(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -7913,8 +7935,8 @@ class TaskProcessorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / "lesson.doc"
             source.write_bytes(make_legacy_office_bytes())
-            with self.assertRaisesRegex(LocalClientError, "仅支持 Word 或 PowerPoint"):
-                normalize_macos_office_document(source, Path(tmp) / "lesson.xlsx", "excel")
+            with self.assertRaisesRegex(LocalClientError, "仅支持 Word、PowerPoint 或 Excel"):
+                normalize_macos_office_document(source, Path(tmp) / "lesson.xlsx", "outlook")
             with patch("k12.local_client.macos_office_adapter_available", return_value=True):
                 with self.assertRaisesRegex(LocalClientError, "输出必须为 .docx"):
                     normalize_macos_office_document(source, Path(tmp) / "lesson.pptx", "word")
@@ -9515,11 +9537,11 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(matrix["source"], "PRD 第 17 章验收标准")
             self.assertEqual(matrix["summary"]["groups"], 10)
             self.assertEqual(matrix["summary"]["items"], 96)
-            self.assertEqual(matrix["summary"]["uncovered_risks"], 8)
+            self.assertEqual(matrix["summary"]["uncovered_risks"], 10)
             risks = {item["key"]: item for item in matrix["uncovered_risks"]}
             self.assertEqual(
                 set(risks),
-                {"17.3.3", "17.3.6", "17.4.5", "17.6.2", "17.6.5", "17.7.2", "17.7.4", "17.10.7"},
+                {"17.2.4", "17.2.6", "17.3.3", "17.3.6", "17.4.5", "17.6.2", "17.6.5", "17.7.2", "17.7.4", "17.10.7"},
             )
             self.assertIn("external_or_native_verification_required", risks["17.3.3"]["blocking_reasons"])
             self.assertIn("真实环境", risks["17.4.5"]["uncovered_risk"])
@@ -9541,13 +9563,14 @@ class TaskProcessorTests(unittest.TestCase):
             self.assertEqual(word_items["17.2.2"]["status"], "已覆盖")
             self.assertIn("内置转换自检通过", word_items["17.2.2"]["evidence"])
             self.assertIn("无历史任务", word_items["17.2.2"]["current"])
-            self.assertEqual(word_items["17.2.4"]["status"], "已覆盖")
-            self.assertIn("图片对象进入 PPTX 对象保留清单", word_items["17.2.4"]["evidence"])
-            self.assertIn("真实排版和 OLE 写回仍需本地 Office/MathType", word_items["17.2.4"]["current"])
+            self.assertEqual(word_items["17.2.4"]["status"], "部分实测")
+            self.assertIn("图片引用和原始字节已验证", word_items["17.2.4"]["evidence"])
+            self.assertIn("17.2.4", risks)
             self.assertEqual(word_items["17.2.5"]["status"], "已覆盖")
-            self.assertIn("表格结构进入 PPTX 对象保留清单", word_items["17.2.5"]["evidence"])
-            self.assertEqual(word_items["17.2.6"]["status"], "已覆盖")
-            self.assertIn("OMML 与 MathType/嵌入对象进入 PPTX 对象保留清单", word_items["17.2.6"]["evidence"])
+            self.assertIn("原生可编辑表格", word_items["17.2.5"]["evidence"])
+            self.assertEqual(word_items["17.2.6"]["status"], "未完成对象写回")
+            self.assertIn("输出未包含源 MathType 嵌入对象", word_items["17.2.6"]["evidence"])
+            self.assertIn("17.2.6", risks)
             self.assertEqual(word_items["17.2.8"]["status"], "已覆盖")
             self.assertIn("公式批量格式化自检通过", word_items["17.2.8"]["evidence"])
             self.assertIn("真实 MathType 对象写回仍需本地客户端", word_items["17.2.8"]["current"])
@@ -10215,7 +10238,7 @@ def make_pptx_bytes(extra_files: dict[str, bytes] | None = None, slide_xml: str 
     buffer = BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("[Content_Types].xml", "<Types></Types>")
-        archive.writestr("ppt/presentation.xml", "<p:presentation></p:presentation>")
+        archive.writestr("ppt/presentation.xml", '<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"></p:presentation>')
         archive.writestr(
             "ppt/slides/slide1.xml",
             slide_xml

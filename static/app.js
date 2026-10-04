@@ -4599,14 +4599,15 @@ async function locateImageInSource(fileId, location, reportId = "", imageId = ""
     return;
   }
   const term = String(location || "").trim();
-  const matched = !term || (state.filePreview?.pages || []).some((page) => previewPageSearchText(page).includes(term.toLowerCase()));
-  state.previewSearch = term;
+  const locations = term.split("；").map((value) => value.trim()).filter(Boolean);
+  const matchedTerm = locations.find((value) => (state.filePreview?.pages || []).some((page) => previewPageSearchText(page).includes(value.toLowerCase())));
+  const matched = !term || Boolean(matchedTerm);
+  state.previewSearch = matchedTerm || "";
   state.previewPageOffset = 0;
   renderFilePreview();
   switchView("workspace");
   if (!matched) {
-    const marked = await markImageLocationUnknown(reportId, imageId, "来源预览中未命中图片位置，已标记位置未知");
-    toast(marked ? "图片定位失败，已标记为位置未知" : "未在来源预览中命中图片位置");
+    toast("已打开来源预览；当前位置记录未包含在预览中，请查看图片报告中的来源位置");
     return;
   }
   toast("已跳转到来源文件预览");
@@ -5315,6 +5316,24 @@ function loadMacroSequenceFromLatestReport() {
   toast(`已载入 ${ordered.length} 个宏，可调整顺序后重新执行`);
 }
 
+// 仅发送用户指定的 Excel 参数，留空项继续继承系统设置。
+function collectExcelTaskOptions() {
+  const options = {};
+  const sheets = $("#excelTaskSheets")?.value.trim();
+  const cells = $("#excelTaskCells")?.value.trim();
+  const range = cells ? "选区" : $("#excelTaskRange")?.value;
+  const formulaMode = $("#excelTaskFormulaMode")?.value;
+  const split = $("#excelTaskSplit")?.value;
+  if (sheets) options.sheetNames = sheets.split(/[,，;；\n]+/).map((name) => name.trim()).filter(Boolean);
+  if (cells) options.cellRefs = cells;
+  if (range) options.conversionRange = range;
+  if (formulaMode) options.formulaMode = formulaMode;
+  if (split) options.splitSheets = split === "true";
+  const comments = $("#excelTaskComments")?.value;
+  if (comments) options.retainComments = comments === "true";
+  return options;
+}
+
 function collectTaskOptions(taskType = "") {
   const workspaceFailureStrategy = $("#workspaceFailureStrategy")?.value || "跳过";
   const workspaceConcurrency = clampNumber($("#workspaceConcurrency")?.value, 3, 1, 8);
@@ -5327,6 +5346,7 @@ function collectTaskOptions(taskType = "") {
       }
     : {};
   return {
+    excel: collectExcelTaskOptions(),
     workflowOrder,
     workflowLabels: workflowOrder.map((item) => taskLabels[item] || item),
     failureStrategy: $("#macroFailureStrategy")?.value || state.settings.macroFailureStrategy,

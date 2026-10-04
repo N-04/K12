@@ -17,7 +17,10 @@ import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
 from urllib.parse import urlencode, urlparse
+
+from .media import image_locations
 
 from .models import (
     LOCAL_REQUIRED_TASKS,
@@ -33,6 +36,7 @@ from .models import (
     utc_now,
 )
 from .converters import (
+    count_xml_elements,
     build_docx,
     build_docx_from_pdf_text,
     build_docx_from_slides,
@@ -48,6 +52,7 @@ from .converters import (
     extract_pptx_slides,
     extract_xlsx_sheets,
 )
+from .excel import effective_excel_settings, select_excel_sheets
 from .install_profiles import install_profile, normalize_platform
 from .mathpix import MathpixApiError, MathpixClient, MathpixConfigError
 from .previews import build_file_preview
@@ -397,7 +402,7 @@ class DocumentAnalyzer:
         footer_count = sum(1 for name in names if name.startswith("word/footer") and name.endswith(".xml"))
         revision_count = len(re.findall(r"<w:(?:ins|del|moveFrom|moveTo)(?:\s|>)", document_xml))
         item.page_count = max(item.page_count, self._read_app_count(archive, "Pages"))
-        item.has_omml = "<m:oMath" in document_xml or "<m:oMathPara" in document_xml
+        item.has_omml = count_xml_elements(document_xml, "oMath") > 0
         item.has_mathtype = embedded_count > 0 or "Equation Native" in document_xml or "MathType" in document_xml
         item.has_formula = item.has_omml or item.has_mathtype or "$$" in document_xml
         normalized_names = {name.replace("\\", "/").lower() for name in names}
@@ -405,12 +410,12 @@ class DocumentAnalyzer:
         item.has_image = image_count > 0
         item.has_small_image = image_count > 0
         item.content_summary = {
-            "paragraphs": document_xml.count("<w:p"),
+            "paragraphs": count_xml_elements(document_xml, "p"),
             "headings": len(re.findall(r"<w:pStyle[^>]+w:val=\"Heading", document_xml)),
-            "tables": document_xml.count("<w:tbl"),
+            "tables": count_xml_elements(document_xml, "tbl"),
             "images": image_count,
             "embeddedObjects": embedded_count,
-            "ommlFormulas": document_xml.count("<m:oMath"),
+            "ommlFormulas": count_xml_elements(document_xml, "oMath"),
             "headers": header_count,
             "footers": footer_count,
             "footnotes": footnotes_xml.count("<w:footnote "),
@@ -1369,7 +1374,7 @@ class TaskProcessor:
                     "path": str(resolved),
                     "url": f"/api/artifacts/{task['id']}/{resolved.name}",
                     "status": "成功",
-                    "message": "本地 Office 客户端已回传并验证转换产物",
+                    "message": "本地 Office 客户端已回传并验证转换产物" + ("；" + str(output["message"])[:2000] if output.get("message") else ""),
                     "size": actual_size,
                     "sha256": actual_sha256,
                     "native_execution_verified": True,
@@ -3171,10 +3176,11 @@ class TaskProcessor:
                     self._acceptance_item(
                         "17.2.4",
                         "图片不丢失",
-                        "good" if word_object_probe.get("image_available") else "warn",
-                        "已覆盖" if word_object_probe.get("image_available") else "自检失败",
+                        "warn",
+                        "部分实测" if word_object_probe.get("image_available") else "未完成对象写回",
                         str(word_object_probe.get("image_evidence") or word_object_probe.get("evidence") or "对象保留清单会记录图片数量，真实排版需本地 Office 复核"),
                         current=str(word_object_probe.get("current") or "Word 对象保留自检未运行"),
+                        gap="输出未证明源图片对象完整保留，需实际图片写回与关联检查。",
                     ),
                     self._acceptance_item(
                         "17.2.5",
@@ -3188,9 +3194,10 @@ class TaskProcessor:
                         "17.2.6",
                         "MathType 公式不丢失",
                         "good" if word_object_probe.get("formula_available") else "warn",
-                        "已覆盖" if word_object_probe.get("formula_available") else "自检失败",
+                        "已覆盖" if word_object_probe.get("formula_available") else "未完成对象写回",
                         str(word_object_probe.get("formula_evidence") or word_object_probe.get("evidence") or "MathType/嵌入对象进入保留清单，真实 OLE 写回需本地客户端"),
                         current=str(word_object_probe.get("current") or "Word 对象保留自检未运行"),
+                        gap="输出未证明 MathType 对象保留，需原生对象写回及公式复核。",
                     ),
                     self._acceptance_item("17.2.7", "用户可选择是否启用 MathType 格式化", "good", "已覆盖", "设置页提供 MathType 格式化开关", current=f"当前为{'开启' if formula_formatting else '关闭'}"),
                     self._acceptance_item(
@@ -3807,6 +3814,7 @@ class TaskProcessor:
                 root = Path(tmp)
                 source = root / "objects.docx"
                 target = root / "objects.pptx"
+                image_data = base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAIAAAABCAIAAAB7QOjdAAAAD0lEQVR4nGP4z8DA8J8BAAf/Af8Bf4mnAAAAAElFTkSuQmCC')
                 document_xml = (
                     '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" '
                     'xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">'
@@ -3815,11 +3823,13 @@ class TaskProcessor:
                     '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>表格内容</w:t></w:r></w:p></w:tc></w:tr></w:tbl>'
                     '<m:oMath><m:r><m:t>x=1</m:t></m:r></m:oMath>'
                     '<w:p><w:r><w:t>MathType 对象</w:t></w:r></w:p>'
+                    '<w:p><w:r><w:drawing xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><wp:inline><wp:extent cx="2000000" cy="1000000"/><a:blip r:embed="image"/></wp:inline></w:drawing></w:r></w:p>'
                     "</w:document>"
                 )
                 with zipfile.ZipFile(source, "w", zipfile.ZIP_DEFLATED) as archive:
                     archive.writestr("word/document.xml", document_xml)
-                    archive.writestr("word/media/probe.png", b"k12-image-probe")
+                    archive.writestr("word/media/probe.png", image_data)
+                    archive.writestr("word/_rels/document.xml.rels", '<Relationships><Relationship Id="image" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/probe.png"/></Relationships>')
                     archive.writestr("word/embeddings/oleObject1.bin", b"k12-mathtype-probe")
                 summary = extract_docx_object_summary(source)
                 blocks = extract_docx_blocks(source)
@@ -3834,37 +3844,25 @@ class TaskProcessor:
                     )
                 source_counts = preservation.get("source") or {}
                 statuses = preservation.get("statuses") or {}
-                image_available = (
-                    int(source_counts.get("images") or 0) >= 1
-                    and statuses.get("images") == "计划保留图片对象"
-                    and "图片 1 个" in slide_xml
-                )
-                table_available = (
-                    int(source_counts.get("tables") or 0) >= 1
-                    and statuses.get("tables") == "计划保留表格结构"
-                    and "表格 1 个" in slide_xml
-                )
-                formula_available = (
-                    int(source_counts.get("omml_formulas") or 0) >= 1
-                    and int(source_counts.get("mathtype_objects") or 0) >= 1
-                    and statuses.get("formulas") == "计划保留公式对象"
-                    and "OMML 1 个" in slide_xml
-                    and "MathType 1 个" in slide_xml
-                )
-                if not (image_available and table_available and formula_available):
-                    raise ValueError("对象保留清单缺少图片、表格或 MathType/OMML 证据")
+                with zipfile.ZipFile(target) as archive:
+                    image_available = any(name.startswith("ppt/media/") and archive.read(name) == image_data for name in archive.namelist())
+                    formula_available = any(name.startswith("ppt/embeddings/") and archive.read(name) == b"k12-mathtype-probe" for name in archive.namelist())
+                table_available = "<a:tbl>" in slide_xml and "表格内容" in slide_xml
+                image_available = image_available and sum(slide.get("image_count", 0) for slide in extract_pptx_slides(target)) == 1
+                contract_available = "图片 1 个" in slide_xml and "MathType 1 个" in slide_xml
                 probe = {
                     "schema_version": "k12.wordObjectPreservationProbe.v1",
-                    "available": True,
-                    "image_available": True,
-                    "table_available": True,
-                    "formula_available": True,
+                    "available": image_available and table_available and formula_available,
+                    "contract_available": contract_available,
+                    "image_available": image_available,
+                    "table_available": table_available,
+                    "formula_available": formula_available,
                     "source": source_counts,
                     "statuses": statuses,
-                    "image_evidence": "Word 对象保留自检通过：图片对象进入 PPTX 对象保留清单",
-                    "table_evidence": "Word 对象保留自检通过：表格结构进入 PPTX 对象保留清单",
-                    "formula_evidence": "Word 对象保留自检通过：OMML 与 MathType/嵌入对象进入 PPTX 对象保留清单",
-                    "current": "自检通过，图片 1 个、表格 1 个、OMML 1 个、MathType 1 个；真实排版和 OLE 写回仍需本地 Office/MathType 复核",
+                    "image_evidence": "内嵌 PNG 样本的输出部件、图片引用和原始字节已验证；全部图片格式与原生布局验收仍未完成" if image_available else "输出未包含源图片部件；对象清单不能证明图片保留",
+                    "table_evidence": "输出已包含原生可编辑表格及源单元格文字" if table_available else "输出未验证原生表格",
+                    "formula_evidence": "输出嵌入对象部件已验证" if formula_available else "输出未包含源 MathType 嵌入对象；对象清单不能证明公式保留",
+                    "current": "产物自检：内嵌 PNG 样本和原生表格已验证；完整图片保真与 MathType 对象写回仍待验收",
                 }
         except Exception as exc:
             message = self._redact_local_path_text(str(exc) or exc.__class__.__name__)
@@ -4198,7 +4196,7 @@ class TaskProcessor:
             if not item.get("preserve_original_formula") or not policy.get("preserve_original_formula"):
                 raise ValueError("已有 MathType 公式未记录原公式保留")
             object_probe = self._word_object_preservation_probe()
-            if not object_probe.get("formula_available"):
+            if not object_probe.get("contract_available"):
                 raise ValueError("对象保留清单未证明 MathType/OLE 线索")
             probe = {
                 "schema_version": "k12.mathTypePreservationProbe.v1",
@@ -7308,6 +7306,8 @@ class TaskProcessor:
                     "file_id": item.get("file_id", ""),
                     "source_file": item.get("source_file", ""),
                     "output_type": item.get("output_type", ""),
+                    "conversion_settings": item.get("conversion_settings") or self._conversion_settings_snapshot(task, task_type),
+                    "excel_options": dict(task.get("options", {}).get("excel") or {}),
                 }
                 for item in artifacts
                 if item.get("status") == "待本地客户端执行"
@@ -9398,7 +9398,7 @@ class TaskProcessor:
     def _word_to_ppt_artifact(self, task: dict[str, Any], file: dict[str, Any], source: Path, output_dir: Path) -> dict[str, Any]:
         """生成 Word 转 PPT 产物和对象保留摘要。"""
         try:
-            blocks = extract_docx_blocks(source)
+            blocks = extract_docx_blocks(source, retain_images=bool(self._conversion_settings_snapshot(task, "word_to_ppt").get("retain_images", True)))
             object_summary = extract_docx_object_summary(source)
             word_options = dict(task.get("options", {}).get("word") or {})
             max_chars = int(word_options.get("maxCharsPerSlide", 320) or 320)
@@ -9410,14 +9410,18 @@ class TaskProcessor:
                 artifact = self._artifact_skipped(task, file, "pptx", existing_target.name, f"同名输出已存在，按策略跳过：{existing_target.name}", self._conversion_settings_snapshot(task, "word_to_ppt"))
                 artifact["object_preservation"] = object_preservation
                 return artifact
-            build_pptx_from_docx(blocks, target, max_chars, auto_pagination, generate_toc, object_preservation)
+            warnings = build_pptx_from_docx(blocks, target, max_chars, auto_pagination, generate_toc, object_preservation,
+                                 retain_tables=bool(word_options.get("retainTables", self.store.get_settings().get("retainTables", True))),
+                                 retain_images=bool(word_options.get("retainImages", self.store.get_settings().get("retainImages", True)))) or []
             message = f"生成 PPTX，提取段落 {len(blocks)} 个"
             if object_preservation.get("has_objects"):
                 message = f"{message}，写入对象保留清单"
+            if warnings:
+                message += "；提示：" + "；".join(warnings)
             artifact = self._artifact_success(task, file, target, "pptx", message, self._conversion_settings_snapshot(task, "word_to_ppt"))
             artifact["object_preservation"] = object_preservation
             return artifact
-        except (OSError, KeyError, zipfile.BadZipFile) as exc:
+        except (OSError, KeyError, ValueError, TypeError, zipfile.BadZipFile) as exc:
             return self._artifact_error(task, file, "conversion_failed", str(exc))
 
     def _word_to_ppt_object_preservation(self, task: dict[str, Any], source: dict[str, Any]) -> dict[str, Any]:
@@ -9466,7 +9470,7 @@ class TaskProcessor:
     def _ppt_to_word_artifact(self, task: dict[str, Any], file: dict[str, Any], source: Path, output_dir: Path) -> dict[str, Any]:
         """根据提取的幻灯片结构生成 PPT 转 Word 产物。"""
         try:
-            slides = extract_pptx_slides(source)
+            slides = extract_pptx_slides(source, retain_images=bool(self._conversion_settings_snapshot(task, "ppt_to_word").get("ppt_retain_images", True)))
             target, existing_target, _strategy = self._conversion_output_target(output_dir, file["file_name"], ".docx")
             if target is None:
                 return self._artifact_skipped(task, file, "docx", existing_target.name, f"同名输出已存在，按策略跳过：{existing_target.name}", self._conversion_settings_snapshot(task, "ppt_to_word"))
@@ -9478,7 +9482,7 @@ class TaskProcessor:
             include_notes = bool(ppt_options.get("extractNotes", True))
             retain_images = bool(ppt_options.get("retainImages", settings.get("retainImages", True)))
             retain_formulas = bool(ppt_options.get("retainFormulas", True))
-            build_docx_from_slides(
+            warnings = build_docx_from_slides(
                 slides,
                 target,
                 mode,
@@ -9487,9 +9491,11 @@ class TaskProcessor:
                 include_notes,
                 retain_images,
                 retain_formulas,
-            )
-            return self._artifact_success(task, file, target, "docx", f"生成 DOCX，提取幻灯片 {len(slides)} 页", self._conversion_settings_snapshot(task, "ppt_to_word"))
-        except (OSError, KeyError, zipfile.BadZipFile) as exc:
+                retain_tables=bool(ppt_options.get("retainTables", settings.get("retainTables", True))),
+            ) or []
+            warning_message = "；提示：" + "；".join(warnings) if warnings else ""
+            return self._artifact_success(task, file, target, "docx", f"生成 DOCX，提取幻灯片 {len(slides)} 页{warning_message}", self._conversion_settings_snapshot(task, "ppt_to_word"))
+        except (OSError, KeyError, ValueError, zipfile.BadZipFile) as exc:
             return self._artifact_error(task, file, "conversion_failed", str(exc))
 
     def _excel_to_pdf_artifacts(self, task: dict[str, Any], file: dict[str, Any], source: Path, output_dir: Path) -> list[dict[str, Any]]:
@@ -9502,9 +9508,10 @@ class TaskProcessor:
                 if target is None:
                     artifacts.append(self._artifact_skipped(task, file, "pdf", existing_target.name, f"同名输出已存在，按策略跳过：{existing_target.name}", self._conversion_settings_snapshot(task, "excel_to_pdf")))
                     continue
-                build_pdf_from_xlsx(group, target, file["file_name"])
+                warnings = build_pdf_from_xlsx(group, target, file["file_name"])
+                warning_message = "；提示：" + "；".join(warnings) if warnings else ""
                 cell_count = sum(len(sheet.get("cells", [])) for sheet in group)
-                artifacts.append(self._artifact_success(task, file, target, "pdf", f"生成 PDF，提取工作表 {len(group)} 个、单元格 {cell_count} 个{split_label}", self._conversion_settings_snapshot(task, "excel_to_pdf")))
+                artifacts.append(self._artifact_success(task, file, target, "pdf", f"生成 PDF，提取工作表 {len(group)} 个、单元格 {cell_count} 个{split_label}{warning_message}", self._conversion_settings_snapshot(task, "excel_to_pdf")))
             return artifacts
         except (OSError, KeyError, zipfile.BadZipFile, ValueError) as exc:
             return [self._artifact_error(task, file, "conversion_failed", str(exc))]
@@ -9519,9 +9526,10 @@ class TaskProcessor:
                 if target is None:
                     artifacts.append(self._artifact_skipped(task, file, "docx", existing_target.name, f"同名输出已存在，按策略跳过：{existing_target.name}", self._conversion_settings_snapshot(task, "excel_to_word")))
                     continue
-                build_docx_from_xlsx(group, target, file["file_name"])
+                warnings = build_docx_from_xlsx(group, target, file["file_name"])
+                warning_message = "；提示：" + "；".join(warnings) if warnings else ""
                 cell_count = sum(len(sheet.get("cells", [])) for sheet in group)
-                artifacts.append(self._artifact_success(task, file, target, "docx", f"生成 DOCX，提取工作表 {len(group)} 个、单元格 {cell_count} 个{split_label}", self._conversion_settings_snapshot(task, "excel_to_word")))
+                artifacts.append(self._artifact_success(task, file, target, "docx", f"生成 DOCX，提取工作表 {len(group)} 个、单元格 {cell_count} 个{split_label}{warning_message}", self._conversion_settings_snapshot(task, "excel_to_word")))
             return artifacts
         except (OSError, KeyError, zipfile.BadZipFile, ValueError) as exc:
             return [self._artifact_error(task, file, "conversion_failed", str(exc))]
@@ -9536,8 +9544,9 @@ class TaskProcessor:
                 if target is None:
                     artifacts.append(self._artifact_skipped(task, file, "pptx", existing_target.name, f"同名输出已存在，按策略跳过：{existing_target.name}", self._conversion_settings_snapshot(task, "excel_to_ppt")))
                     continue
-                build_pptx_from_xlsx(group, target, file["file_name"])
-                artifacts.append(self._artifact_success(task, file, target, "pptx", f"生成 PPTX，提取工作表 {len(group)} 个{split_label}", self._conversion_settings_snapshot(task, "excel_to_ppt")))
+                warnings = build_pptx_from_xlsx(group, target, file["file_name"])
+                warning_message = "；提示：" + "；".join(warnings) if warnings else ""
+                artifacts.append(self._artifact_success(task, file, target, "pptx", f"生成 PPTX，提取工作表 {len(group)} 个{split_label}{warning_message}", self._conversion_settings_snapshot(task, "excel_to_ppt")))
             return artifacts
         except (OSError, KeyError, zipfile.BadZipFile, ValueError) as exc:
             return [self._artifact_error(task, file, "conversion_failed", str(exc))]
@@ -9571,121 +9580,11 @@ class TaskProcessor:
         """判断是否将 Excel 工作表拆为单独产物。"""
         settings = self.store.get_settings()
         excel_options = dict(task.get("options", {}).get("excel") or {})
-        if "splitSheets" in excel_options:
-            return bool(excel_options.get("splitSheets"))
-        if "splitWorksheets" in excel_options:
-            return bool(excel_options.get("splitWorksheets"))
-        return bool(settings.get("excelSplitSheets", False))
+        return effective_excel_settings(excel_options, settings)["excel_split_sheets"]
 
     def _excel_sheets_for_conversion(self, sheets: list[dict[str, Any]], task: dict[str, Any]) -> list[dict[str, Any]]:
-        """按转换范围筛选并标注 Excel 工作表。"""
-        settings = self.store.get_settings()
-        excel_options = dict(task.get("options", {}).get("excel") or {})
-        range_mode = str(excel_options.get("conversionRange") or settings.get("excelConversionRange", "全部工作表") or "全部工作表")
-        formula_mode = self._excel_formula_mode(excel_options, settings)
-        selected_names = self._excel_selected_sheet_names(excel_options)
-        selected_indexes = self._excel_selected_sheet_indexes(excel_options)
-        selected = sheets
-        if selected_names or selected_indexes:
-            selected = [
-                sheet
-                for sheet in sheets
-                if str(sheet.get("name", "")).strip().lower() in selected_names or int(sheet.get("index", 0) or 0) in selected_indexes
-            ]
-            selected = selected or sheets[:1]
-            label = "指定工作表"
-        elif range_mode == "当前工作表":
-            selected = sheets[:1]
-            label = "当前工作表"
-        elif range_mode == "选区":
-            selected = [self._excel_selection_sheet(sheets[0], excel_options)] if sheets else []
-            label = str(selected[0].get("conversion_range", "选区")) if selected else "选区"
-        else:
-            selected = sheets
-            label = "全部工作表"
-        return [self._excel_sheet_with_range(sheet, label, formula_mode) for sheet in selected]
-
-    @staticmethod
-    def _excel_formula_mode(options: dict[str, Any], settings: dict[str, Any]) -> str:
-        """确定保留 Excel 公式还是计算结果。"""
-        if "retainFormulas" in options:
-            return "保留公式" if bool(options.get("retainFormulas")) else "仅保留计算结果"
-        mode = str(options.get("formulaMode") or options.get("excelFormulaMode") or settings.get("excelFormulaMode", "保留公式") or "保留公式")
-        return mode if mode in {"保留公式", "仅保留计算结果"} else "保留公式"
-
-    @staticmethod
-    def _excel_selected_sheet_names(options: dict[str, Any]) -> set[str]:
-        """从任务选项解析选中的工作表名称。"""
-        raw = options.get("sheetNames") or options.get("selectedSheets") or []
-        if isinstance(raw, str):
-            values = re.split(r"[,，;；\n]+", raw)
-        elif isinstance(raw, list):
-            values = [str(item) for item in raw]
-        else:
-            values = []
-        return {value.strip().lower() for value in values if value.strip()}
-
-    @staticmethod
-    def _excel_selected_sheet_indexes(options: dict[str, Any]) -> set[int]:
-        """从任务选项解析选中的工作表序号。"""
-        raw = options.get("sheetIndexes") or options.get("selectedSheetIndexes") or []
-        if isinstance(raw, str):
-            values = re.split(r"[,，;；\n]+", raw)
-        elif isinstance(raw, list):
-            values = raw
-        else:
-            values = []
-        indexes: set[int] = set()
-        for value in values:
-            try:
-                index = int(value)
-            except (TypeError, ValueError):
-                continue
-            if index > 0:
-                indexes.add(index)
-        return indexes
-
-    @staticmethod
-    def _excel_selection_sheet(sheet: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
-        """返回限制在选中单元格或安全预览范围内的工作表副本。"""
-        selected = dict(sheet)
-        cells = list(selected.get("cells", []))
-        cell_refs = options.get("cellRefs") or options.get("selectedCells") or []
-        if isinstance(cell_refs, str):
-            refs = {value.strip().upper() for value in re.split(r"[,，;；\s]+", cell_refs) if value.strip()}
-        elif isinstance(cell_refs, list):
-            refs = {str(value).strip().upper() for value in cell_refs if str(value).strip()}
-        else:
-            refs = set()
-        if refs:
-            selected["cells"] = [cell for cell in cells if str(cell.get("ref", "")).upper() in refs]
-            selected["conversion_range"] = f"选区 {'、'.join(sorted(refs))}"
-            return selected
-        try:
-            limit = max(1, min(200, int(options.get("cellLimit", 12) or 12)))
-        except (TypeError, ValueError):
-            limit = 12
-        selected["cells"] = cells[:limit]
-        selected["conversion_range"] = f"选区 前 {min(limit, len(cells))} 个单元格"
-        return selected
-
-    @staticmethod
-    def _excel_sheet_with_range(sheet: dict[str, Any], label: str, formula_mode: str) -> dict[str, Any]:
-        """为工作表附加转换范围和公式模式。"""
-        selected = dict(sheet)
-        selected["conversion_range"] = selected.get("conversion_range") or label
-        selected["formula_mode"] = formula_mode
-        if formula_mode == "仅保留计算结果":
-            selected["cells"] = [TaskProcessor._excel_cell_result_only(cell) for cell in selected.get("cells", [])]
-        return selected
-
-    @staticmethod
-    def _excel_cell_result_only(cell: dict[str, Any]) -> dict[str, Any]:
-        """返回以已存结果替代公式的单元格副本。"""
-        converted = dict(cell)
-        if converted.get("formula"):
-            converted["value"] = converted.get("result") or "计算结果未保存"
-        return converted
+        """共享网页与原生转换的范围和公式处理规则。"""
+        return select_excel_sheets(sheets, dict(task.get("options", {}).get("excel") or {}), self.store.get_settings())
 
     def _conversion_settings_snapshot(self, task: dict[str, Any], task_type: str) -> dict[str, Any]:
         """保存生成产物所用的转换设置快照。"""
@@ -9702,11 +9601,10 @@ class TaskProcessor:
             "ppt_extract_notes": ppt_options.get("extractNotes", True),
             "ppt_retain_images": ppt_options.get("retainImages", settings.get("retainImages", True)),
             "ppt_retain_formulas": ppt_options.get("retainFormulas", True),
+            "ppt_retain_tables": ppt_options.get("retainTables", settings.get("retainTables", True)),
             "pdf_precision_mode": settings.get("pdfPrecisionMode", "平衡"),
             "pdf_to_word_engine": settings.get("pdfToWordEngine", "Mathpix"),
-            "excel_conversion_range": settings.get("excelConversionRange", "全部工作表"),
-            "excel_formula_mode": settings.get("excelFormulaMode", "保留公式"),
-            "excel_split_sheets": settings.get("excelSplitSheets", False),
+            **effective_excel_settings(dict(task.get("options", {}).get("excel") or {}), settings),
             "output_conflict_strategy": settings.get("outputConflictStrategy", "自动重命名"),
             "retain_images": word_options.get("retainImages", settings.get("retainImages", True)),
             "retain_tables": word_options.get("retainTables", settings.get("retainTables", True)),
@@ -9716,7 +9614,7 @@ class TaskProcessor:
             "retain_revisions": settings.get("retainRevisions", False),
             "word_max_chars_per_slide": word_options.get("maxCharsPerSlide", 320),
             "word_auto_pagination": word_options.get("autoPagination", True),
-            "word_generate_toc": word_options.get("generateToc", True),
+            "word_generate_toc": word_options.get("generateToc", False),
             "word_retain_formulas": word_options.get("retainFormulas", True),
             "word_convert_omml_first": word_options.get("convertOmmlFirst", True),
             "word_apply_template": word_options.get("applyTemplate", True),
@@ -10310,6 +10208,12 @@ class TaskProcessor:
         try:
             with zipfile.ZipFile(path) as archive:
                 names = [name for name in archive.namelist() if name.startswith(prefix) and not name.endswith("/")]
+                try:
+                    locations = image_locations(archive)
+                except (ET.ParseError, ValueError, KeyError) as exc:
+                    locations = {}
+                    if errors is not None:
+                        errors.append(self._image_extraction_error(file, "", f"图片位置解析失败：{exc}", "修复源文档后重试位置检索"))
                 for index, name in enumerate(names, start=1):
                     try:
                         data = archive.read(name)
@@ -10317,8 +10221,17 @@ class TaskProcessor:
                         if errors is not None:
                             errors.append(self._image_extraction_error(file, name, f"图片条目读取失败：{exc}", "重新上传或修复源文档后重试"))
                         continue
-                    item = self._small_image_from_bytes(file, task, name, data, f"{file['file_type']} 媒体 {index}", index, seen_hashes, errors)
+                    references = locations.get(name, [])
+                    if references and not self.store.get_settings().get("includeHeaderFooterImages", True):
+                        references = [location for location in references if not location.startswith(("页眉", "页脚"))]
+                        if not references:
+                            continue
+                    location = "；".join(references) or f"{file['file_type']} 媒体部件 · {name}（位置未解析）"
+                    header_footer = all(reference.startswith(("页眉", "页脚")) for reference in references) if references else None
+                    pages = sorted({int(match[1]) for reference in references if (match := re.match(r"幻灯片第 (\d+) 页", reference))})
+                    item = self._small_image_from_bytes(file, task, name, data, location, pages[0] if pages else 0, seen_hashes, errors, header_footer)
                     if item:
+                        item["page_indexes"] = pages
                         items.append(item)
         except zipfile.BadZipFile:
             if errors is not None:
@@ -10336,6 +10249,7 @@ class TaskProcessor:
         index: int,
         seen_hashes: set[str] | None = None,
         errors: list[dict[str, Any]] | None = None,
+        header_footer: bool | None = None,
     ) -> dict[str, Any] | None:
         """图片字节满足阈值时生成小图片项。"""
         dimensions = self._image_dimensions(data)
@@ -10352,6 +10266,8 @@ class TaskProcessor:
         if not is_small:
             return None
         flags = self._small_image_flags(source_name, location, data, image_type, seen_hashes)
+        if header_footer is not None:
+            flags["is_header_footer"] = header_footer
         if flags["is_header_footer"] and not settings.get("includeHeaderFooterImages", True):
             return None
         if flags["is_watermark"] and not settings.get("includeWatermarkImages", True):

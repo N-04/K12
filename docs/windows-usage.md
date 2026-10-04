@@ -26,11 +26,11 @@ PyCharm 的项目解释器请选择 `.venv\Scripts\python.exe`，运行配置选
 
 MathType 原生对象写回、OMML 转 MathType、Word VBA 宏实际执行仍需要独立适配器；现有检测、计划和模拟执行不能证明这些功能已完成。旧 `.xls` 的业务转换流程仍未接入原生执行。
 
-## 执行旧 Word/PPT 任务
+## 执行旧 Word/PPT/Excel 任务
 
 1. 在网页设置中保存本地安全令牌，平台选择 Windows。
 2. 在 PowerShell 中设置 `K12_LOCAL_TOKEN`，运行客户端发送心跳。
-3. 上传旧 Word/PPT 文件并创建对应转换任务。
+3. 上传旧 Word/PPT/Excel 文件并创建对应转换任务。旧 `.xls` 支持转 Word、PPT 和 PDF，沿用工作表、选区和公式设置；暂不支持拆分工作表，启用拆分时会明确报错。
 4. 明确授权执行该任务：
 
 ```powershell

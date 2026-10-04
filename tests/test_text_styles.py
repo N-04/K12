@@ -16,7 +16,7 @@ class TextStyleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             source, ppt = Path(temporary) / "source.docx", Path(temporary) / "source.pptx"
             with zipfile.ZipFile(source, "w") as archive:
-                archive.writestr("word/document.xml", '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>标题</w:t></w:r></w:p><w:p><w:r><w:rPr><w:b/><w:i/><w:sz w:val="32"/><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:color w:val="cc3300"/></w:rPr><w:t>格式文字</w:t><w:br/><w:t>第二行</w:t></w:r><w:r><w:rPr><w:b w:val="0"/></w:rPr><w:t>关闭加粗</w:t></w:r></w:p></w:body></w:document>')
+                archive.writestr("word/document.xml", '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>标题</w:t></w:r></w:p><w:p><w:r><w:rPr><w:b/><w:i/><w:u w:val="wavyDouble" w:color="00AA00"/><w:sz w:val="32"/><w:rFonts w:ascii="Times New Roman" w:eastAsia="宋体"/><w:color w:val="cc3300"/></w:rPr><w:t>格式文字</w:t><w:br/><w:t>第二行</w:t></w:r><w:r><w:rPr><w:b w:val="0"/><w:u w:val="none"/></w:rPr><w:t>关闭加粗</w:t></w:r></w:p></w:body></w:document>')
             build_pptx_from_docx(extract_docx_blocks(source), ppt)
             slides = extract_pptx_slides(ppt)
             for mode in ("逐页讲义模式", "大纲模式"):
@@ -28,6 +28,8 @@ class TextStyleTests(unittest.TestCase):
                 self.assertTrue(all(run["i"] and run["size"] == 1600 and run["font"] == "Times New Roman" and run["east_asia"] == "宋体" and run["color"] == "CC3300" for run in styled))
                 self.assertEqual(body["text"], "格式文字\n第二行关闭加粗")
                 self.assertFalse(body["runs"][-1]["b"])
+                self.assertTrue(all(run["underline"] == "wavyDbl" and run["underline_color"] == "00AA00" for run in styled))
+                self.assertEqual(body["runs"][-1]["underline"], "none")
 
     def test_theme_underline_color_and_direct_override(self) -> None:
         """主题下划线继承实际颜色，直接 RGB 覆盖会清除旧主题引用。"""

@@ -13,7 +13,7 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
-from .text_styles import WordTextStyles
+from .text_styles import UNDERLINES, WordTextStyles
 from .charts import OFFICE_REL, REL_NS, build_chart, chart_frame, chart_has_values
 from .ooxml import parse_compatible_xml
 from .media import IMAGE_TYPES, picture_xml, word_images, word_picture_xml, word_story_images
@@ -1062,6 +1062,13 @@ def _pptx_styled_paragraphs(xml: str) -> list[list[dict]]:
                 run = {"text": node.findtext("{*}t", "")}
                 properties = node.find("{*}rPr")
                 if properties is not None:
+                    if properties.get("u"):
+                        if properties.get("u") not in UNDERLINES.values():
+                            raise ValueError("PPT 下划线类型无效")
+                        run["underline"] = properties.get("u")
+                    underline_color = properties.find("{*}uFill/{*}solidFill/{*}srgbClr")
+                    if underline_color is not None and re.fullmatch(r"[0-9a-fA-F]{6}", underline_color.get("val", "")):
+                        run["underline_color"] = underline_color.get("val").upper()
                     for key in ("b", "i"):
                         if key in properties.attrib:
                             run[key] = properties.get(key) not in {"0", "false", "off"}
@@ -1650,6 +1657,12 @@ def _docx_paragraph(text: str, style: str, alignment: str = "", runs: list[dict]
             properties.append(f'<w:rFonts {fonts}/>')
         if run.get("color"):
             properties.append(f'<w:color w:val="{html.escape(run["color"], quote=True)}"/>')
+        if "underline" in run:
+            value = next((word for word, drawing in UNDERLINES.items() if drawing == run["underline"]), None)
+            if value is None:
+                raise ValueError("PPT 下划线类型无效")
+            color = f' w:color="{html.escape(run["underline_color"], quote=True)}"' if run.get("underline_color") else ""
+            properties.append(f'<w:u w:val="{value}"{color}/>')
         rpr = f'<w:rPr>{"".join(properties)}</w:rPr>' if properties else ""
         output.append(f'<w:r>{rpr}{"".join(pieces)}</w:r>')
     alignment_xml = f'<w:jc w:val="{alignment}"/>' if alignment in {"left", "center", "right", "both"} else ""
